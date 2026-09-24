@@ -4,7 +4,7 @@
 
 [![Release](https://img.shields.io/github/v/release/LeySure/QuestEcho-Forever?label=Release)](https://github.com/LeySure/QuestEcho-Forever/releases)
 [![WoW Clients](https://img.shields.io/badge/WoW-Retail%20%7C%20Classic%20%7C%20Forever-orange)](https://github.com/LeySure/QuestEcho-Forever/releases)
-[![Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?logo=kofi)](https://ko-fi.com/your_kofi_link)
+[![Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?logo=kofi)](https://ko-fi.com/leysure/tip)
 
 QuestEcho is a lightweight World of Warcraft addon that automatically plays voice lines when you interact with NPCs or handle quests. Designed to enhance role-playing immersion without altering core gameplay.
 
