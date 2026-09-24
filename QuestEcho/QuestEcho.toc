@@ -1,0 +1,11 @@
+﻿## Interface: 121000, 120100, 120007, 50504, 40402, 30405, 20506, 20505, 11509, 11508, 16001
+## Title: QuestEcho
+## Title-zhCN: QuestEcho（任务语音）
+## Notes: Quest voice lines, captions and a playback queue. One build for retail, Forever and Classic-era clients.
+## Notes-zhCN: 任务语音、字幕与播放队列，一个插件同时支持正式服、永恒服与经典旧世客户端。
+## Author: Leysure
+## Version: 1.7.0
+## SavedVariables: QuestEchoDB
+npc_race_lookups.lua
+Core.lua
+Bindings.xml
