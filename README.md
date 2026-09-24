@@ -62,9 +62,9 @@ Multiple data packs can be installed simultaneously without conflicts.
 
 | Client | Supported |
 |--------|-----------|
-| Retail |  |
-| Classic Era |  |
-| Forever |  |
+| Retail | √ |
+| Classic Era | √ |
+| Forever | √ |
 
 ---
 
@@ -72,7 +72,7 @@ Multiple data packs can be installed simultaneously without conflicts.
 
 If QuestEcho helped enhance your adventure, consider supporting the development!
 
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/your_kofi_link)
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/leysure/tip)
 
 Found a bug or have a feature request? Please [open an issue](https://github.com/LeySure/QuestEcho-Forever/issues) on GitHub.
 
@@ -85,7 +85,7 @@ Found a bug or have a feature request? Please [open an issue](https://github.com
 ### 重要提示
 
 - 核心插件不包含任何语音文件，需单独下载语音包。
-- 因语音包体积过大（约 600MB），请从上方 **GitHub Releases** 页面下载。
+- 因语音包体积过大，请从上方 **GitHub Releases** 页面下载。
 - 支持同时安装中英文语音包，互不冲突。
 - 兼容正式服、怀旧服和无限服（Forever）。
 
