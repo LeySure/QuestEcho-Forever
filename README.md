@@ -29,9 +29,9 @@ Due to the large file size (1GB+), the voice packs are distributed via GitHub Re
 
 | File | Description | Size |
 |------|-------------|------|
-| `QuestEcho-1.7.0.zip` | Core addon (required) | ~2MB |
-| `QuestEchoData.zip` | English Voice Pack | ~600MB |
-| `QuestEchoData-zhCN.zip` | Chinese Voice Pack (中文语音包) | ~600MB |
+| `QuestEcho-1.7.0.zip` | Core addon (required) | ~37.9 KB |
+| `QuestEchoData.zip` | English Voice Pack | ~1.6 GB |
+| `QuestEchoData-zhCN.zip` | Chinese Voice Pack (中文语音包) | ~1.33 GB |
 
 Download all files from: **[GitHub Releases – v1.7.0](https://github.com/LeySure/QuestEcho-Forever/releases/tag/1.7.0)**
 
