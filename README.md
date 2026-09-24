@@ -9,7 +9,7 @@
 QuestEcho is a lightweight World of Warcraft addon that automatically plays voice lines when you interact with NPCs or handle quests. Designed to enhance role-playing immersion without altering core gameplay.
 
 ---
-
+![QuestEcho](https://github.com/LeySure/QuestEcho-Forever/blob/main/Screenshot/QuestEcho.png?raw=true)
 ## Features
 
 - **Auto-Play Voiceovers:** Triggers voice lines seamlessly on quest acceptance, quest completion, and NPC gossip interactions.
