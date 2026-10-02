@@ -13,7 +13,7 @@ QuestEcho is a lightweight World of Warcraft addon that automatically plays voic
 ## Features
 
 - **Auto-Play Voiceovers:** Triggers voice lines seamlessly on quest acceptance, quest completion, and NPC gossip interactions.
-- **Cross-Client Support:** Fully compatible with WoW Retail, Classic Era, and Forever clients.
+- **Cross-Client Support:** Fully compatible with WoW Retail, Classic Era, Forever, Vallina（Turtle 1.12）、 WLK 3.3.5a（Warmane） clients.
 - **Lightweight & Efficient:** Minimal performance impact, ensuring a smooth gameplay experience.
 - **Custom Commands:** Use `/qe` to easily toggle settings or manage the addon in-game.
 
@@ -33,7 +33,7 @@ Due to the large file size (1GB+), the voice packs are distributed via GitHub Re
 | `QuestEchoData.zip` | English Voice Pack | ~1.6 GB |
 | `QuestEchoData-zhCN.zip` | Chinese Voice Pack (中文语音包) | ~1.33 GB |
 
-Download all files from: **[GitHub Releases – v1.7.0](https://github.com/LeySure/QuestEcho-Forever/releases/tag/1.7.0)**
+Download all files from: **[GitHub latest Releases](https://github.com/LeySure/QuestEcho-Forever/releases/tag/1.9.0)**
 
 Multiple data packs can be installed simultaneously without conflicts.
 
