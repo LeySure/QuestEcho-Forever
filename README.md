@@ -29,7 +29,7 @@ Due to the large file size (1GB+), the voice packs are distributed via GitHub Re
 
 | File | Description | Size |
 |------|-------------|------|
-| `QuestEcho-1.7.0.zip` | Core addon (required) | <5MB |
+| `QuestEcho.zip` | Core addon (required) | <5MB |
 | `QuestEchoData.zip` | English Voice Pack | >1GB |
 | `QuestEchoData-zhCN.zip` | Chinese Voice Pack (中文语音包) | >1GB |
 
