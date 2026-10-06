@@ -1,5 +1,5 @@
 <Bindings>
-	<Binding name="QE_TOGGLEPAUSE" header="QUESTECHO"> QuestEcho.Keys:TogglePause() </Binding>
-	<Binding name="QE_STOP" header="QUESTECHO"> QuestEcho.Keys:StopAll() </Binding>
-	<Binding name="QE_SETTINGS" header="QUESTECHO"> QuestEcho.Keys:Settings() </Binding>
+	<Binding name="QE_TOGGLEPAUSE" header="QUESTECHO">QuestEcho.Keys:TogglePause()</Binding>
+	<Binding name="QE_STOP">QuestEcho.Keys:StopAll()</Binding>
+	<Binding name="QE_SETTINGS">QuestEcho.Keys:Settings()</Binding>
 </Bindings>
