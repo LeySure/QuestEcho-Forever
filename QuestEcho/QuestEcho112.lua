@@ -318,9 +318,26 @@ local function titleBasedQuestID()
         diag.step = "DataModules not ready"
         return nil
     end
+    -- The lookup is keyed by title, and a title shared by several quests is
+    -- nested under the giver's name. Only the quest window's own title may use
+    -- the target for that: there the target IS the giver, while a title read off
+    -- a log row can have anyone targeted. Ambiguity without a giver is decided
+    -- inside GetQuestID (all ids equal) and stays unresolved otherwise. 2026-10-09
+    local npcName = ""
+    if type(UnitName) == "function" and type(GetTitleText) == "function" then
+        local okPanel, panelTitle = pcall(GetTitleText)
+        if okPanel and cleanTitle(panelTitle) == title then
+            local okNPC, name = pcall(UnitName, "target")
+            if okNPC and type(name) == "string" and name ~= "" then
+                local okPlayer, isPlayer = pcall(UnitIsPlayer, "target")
+                if not (okPlayer and isPlayer) then npcName = name end
+            end
+        end
+    end
+    diag.npcName = npcName
     diag.step = "looking up"
     local okId, id = pcall(function()
-        return QuestEcho.DataModules:GetQuestID("accept", title, "", "")
+        return QuestEcho.DataModules:GetQuestID("accept", title, npcName, "")
     end)
     diag.lookupOk = okId
     diag.lookupResult = tostring(id)

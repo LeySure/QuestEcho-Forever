@@ -1,111 +1,87 @@
 # QuestEcho changelog
 
+## 2.2.6
+- 修复设置面板里标题和说明文字跑到行中间、和右边的取值/按钮叠在一起的问题（看着就是"字挤到一起"）；滑条下方残留的"低/高"文字一并清掉。
+- 「艾泽拉斯地区介绍」的行尾数量改成用插件自带的贴图绘制：个别客户端会把阿拉伯数字画成别的汉字，现在显示稳定；「链接」里和"打开官网"重复的"官方网站"按钮去掉。
+- 设置窗口第一次显示出来以后按真实行高再量一次，「主要设置」页最后两项不再被窗口底边切掉。
+
+## 2.2.5
+- 设置窗口改为按内容自动定高：「主要设置」页最后两项（小地图按钮、测试模式）不再探出窗口底部（各客户端都修了；字体被替换过的客户端会自己再长高一点）。
+- 区域介绍改为默认开启、默认「每个地区只播报一次」；老存档自动对齐一次，之后仍可随意开关。
+- 欢迎窗口两张卡片的说明文字精简；个别客户端把按钮/标签文字截成「两三个字加省略号」的问题，改为显式指定文字宽度来规避。
+
+## 2.2.4
+- 修复「艾泽拉斯地区介绍」里次级地区名被截成"两个字加省略号"，以及行尾数量糊成一团、看着像和地名叠在一起的问题；书页右上角多余的播放键去掉（点列表里的行就能听）。
+- 设置面板的按钮按文字实际宽度自动加宽，文字不再溢出按钮或被截成省略号；说明文字按实际行数撑高，不再压到下一项上。
+
+## 2.2.3
+- 「艾泽拉斯地区介绍」窗口改成左右两栏：右边像翻书一样显示这一条的插图和文字介绍，插图上方有播放键。
+
+## 2.2.2
+- 修复「艾泽拉斯地区介绍」里点地区名没反应的问题（列表宽度没铺开，点击落不到行上）。
+
+## 2.2.1
+- 修复「艾泽拉斯地区介绍」窗口打开后列表只有箭头没有文字、搜索框占位字看不见的问题；窗口改名为「艾泽拉斯地区介绍」。
+
+## 2.2.0
+- 新增「艾泽拉斯地区介绍」窗口：全部地区和次级地区列成清单，点一条试听一条，带搜索；设置里和小地图右键菜单都能打开。
+
+## 2.1.0
+- 新增书籍朗读：打开书自动念、翻页自动跟上、整本连读；信件不念。
+- 新增区域介绍：进入地区或次级地区时播报介绍语音，可在设置里开关。
+
+## 2.0.3
+- 修复"朗读结束后隐藏状态栏"只有在手动点清空时才生效的问题：最后一条语音自然播完后，状态栏现在会正常收起。
+- 收起改为渐隐淡出，不再是突然消失。
+
+## 2.0.2
+- 修复一部分任务（如 1097 艾尔默的任务）明明有语音却提示"这个任务没有对应语音"：同一个任务名被多个任务发布者共用时，只按名字查不到号。
+
+## 2.0.1
+- 设置搬进客户端自带的插件选项列表（小地图右键打开），分主设置 / 主要设置 / 朗读设置三页，带搜索；新增首次欢迎窗口、朗读时降低其它声音、方言语言选项；界面框体直接拖动，不用再按 Shift；任务列表里每行的播放按钮只保留在无限服这类现代客户端（老客户端保留原来的 Echo 按钮）。
+- 10423 条语音重新灌制（音质更好），我方独有的 3844 条继续保留；剩余语音统一压回安全电平，不再爆音。
+
+## 2.0.0
+- 修复无限服、TBC、WLK 的语音不播放：语音文件和时长表都在，却一直提示"没有对应语音"。
+
+## 1.9.13
+- 称呼还原只保留两面对称的形式，不再猜职业和种族。
+
+## 1.9.12
+- 记录当前客户端类型（`profile.DetectedFlavor`），供网站给投稿归档。
+
+## 1.9.11
+- 存档只保留对话与设置，默认关闭聊天捕获。
+
+## 1.9.10
+- 性别 token 一律念、显示"勇士"；非称呼类保持原分支。
+
 ## 1.9.9
-- Captions no longer print the client's raw "$" placeholders. Quest and gossip
-  text is stored - and handed back by the client - with tokens still in it, so a
-  line read "很高兴见到你，$c。" while the voice said 勇士. The caption now
-  resolves them: `$N`/`$n`/`$C`/`$c`/`$R`/`$r` become the word the pack speaks
-  for "you" (勇士 on a Chinese line, read from the line itself so a Chinese pack
-  works on any client locale), `$g`/`$G`/`$T "left:right;"` take the same branch
-  the pack was generated from, and `::tag::` markup is dropped.
-  Known consequence: the Chinese pack was generated from the *second* branch of
-  the gender token, so those lines caption (and speak) the female form - "姑娘",
-  "姐妹", "女士" - for every player. Flagged, not changed: flipping it means
-  regenerating those lines.
+- 字幕不再显示原始 `$` 占位符。
 
 ## 1.9.8
-- Fixed pause (and "clear queue") no longer interrupting the line on clients that
-  play through the music channel - 3.3.5a (build 12340) and TBC. Those clients
-  have no `StopSound`, so once the sound-handle flag stopped being guessed from
-  the interface number the stop path took the channel-blanking fallback first,
-  and that fallback's CVar governs the *sound* channel: the voice simply ran to
-  the end. Stopping a music-channel line is now decided before that fallback, and
-  the fallback is skipped on clients that do not use the sound channel at all.
-  Clients with a real sound handle (retail, Forever, classic era) and clients
-  that rely on the fallback (1.12 / Turtle) are unaffected.
+- 修复走音乐通道的客户端（3.3.5a、TBC）上暂停和清空无效。
 
 ## 1.9.7
-- The quest-log Echo button now knows which quest it is on clients where
-  `GetQuestID` and `C_QuestLog.GetSelectedQuest` answer nil with the details
-  panel open (this client: `GetQuestID()=nil`, and the panel title cannot be
-  read either because `QuestLogDetailFrame` does not exist there). The id is
-  taken from `QuestMapFrame.DetailsFrame.questID` as a fallback - the same field
-  ForeverVO reads on this client - so the click finds a line instead of
-  answering "no voice line for this quest", and the caption can fill in the
-  title it could not read from any frame.
-- `SelectQuestLogEntry` is now avoided on any client that has `C_QuestLog`, not
-  only on those whose interface number calls itself modern. The Forever build
-  reports 16001 while having `C_QuestLog`; it was taking the classic caption
-  path, which is where the "only available to the Blizzard UI" block came from.
-- `/qe diag` reports where the quest id came from (`GetQuestID` / selected /
-  detailsFrame).
+- 修复取不到任务 ID 的客户端上 Echo 按钮点不出语音。
 
 ## 1.9.6
-- Fixed the addon loading as nothing at all - no button, no minimap icon, no
-  slash command and no visible error. `Core.lua` had grown to 204 top-level
-  local variables; Lua allows 200 per chunk, so the file stopped parsing
-  (`FrameXML.log`: "main function has more than 200 local variables") and the
-  client loaded every other file with this one silently skipped. Every client
-  capability flag and playback constant now lives in a single `CAP` table, which
-  brings the main block back to 185 and leaves room for more detection later.
+- 修复插件整体加载失败（局部变量超过 Lua 200 个上限）。
 
 ## 1.9.5
-- The quest-log Echo button now sits directly to the right of the Back arrow on
-  clients whose quest-map panel resolves a relative anchor against a frame other
-  than the one it was given (the 1.16 build reported the button at x=1006 while
-  the Back arrow it named sat at x=729 w=90). The offset is computed from the
-  arrow's own rectangle instead, and is re-applied while the panel is open, so a
-  panel the client rebuilds no longer strands the button at the old position.
-- `/qe diag` now reports the anchor that is actually in effect (GetPoint), the
-  Back frame's rectangle and the effective scales of every frame involved.
-- The 1.12 compatibility layer no longer keys off the interface number. It probes
-  the client for the capabilities it provides instead, and only replaces a global
-  when that capability is genuinely missing. Clients whose version says "vanilla"
-  but whose API is modern (Forever reports 16001) previously had `CreateFrame`,
-  `GetQuestLogTitle` and `PlaySoundFile` replaced at global scope, which put
-  addon code inside Blizzard's own call stack: that produced the "this function
-  is only available to the Blizzard UI" block on login, discarded every sound
-  handle so pause and clear never stopped a line, and handed frame scripts the
-  1.12 argN globals instead of their own arguments.
-- Voice lines play on the configured sound channel again on those clients, with
-  a real handle that StopSound can stop, instead of falling through three
-  retries. The stored channel name is case-corrected ("MASTER" to "Master")
-  because the client rejects the uppercase form.
+- Echo 按钮定位修正；1.12 兼容层改为探测客户端能力。
 
 ## 1.9.4
-- One addon for all three clients: retail, WLK 3.3.5a and Turtle 1.12 now run the
-  same code. Only the .toc file differs, because 1.12 and 3.3.5a need their own
-  version-specific toc to recognise the folder.
-- Fixed no sound after pausing or after clearing the queue while the status bar kept
-  running: the guard that prevents overlapping playback was never cleared when a
-  line was stopped, so replaying the same file was silently refused.
-- Fixed the settings checkboxes showing as green blocks on retail: colouring now goes
-  through SetColorTexture, restoring the gold mark.
+- 三端合一；修复暂停或清空队列后不再出声。
 
 ## 1.9.3
-- Retail 12.0 support: IsAddOnLoaded moved into C_AddOns, so the two remaining direct
-  calls are now routed through the safe wrapper (one of them broke initialisation).
-- The sound channel setting is honoured again, with a three-step fallback
-  (configured channel -> Master -> single argument) so playback cannot fail silently.
-- The Echo button sits next to the Back button again on modern clients.
+- 支持 retail 12.0；声道设置重新生效。
 
 ## 1.9.2
-- Runs on the 1.18 (Turtle), 3.3.5a and 2.4.3 clients from one build.
-- Voice playback, pause, clear and captions work on all of them.
-- The Echo button sits in the quest log, and is always available: press it to hear the
-  quest on screen, or be told it has no line. It is placed beside the log's own map
-  button where that exists, and beside the close button where it does not.
-- The quest log's frame names differ per client, so the detail panel, the anchor and the
-  quest title are each located by trying the known names and then, failing that, by
-  looking through the log's own frames - the title is additionally recognised by its
-  text resolving through the voice pack.
-- Captions always match the voice: they come from the same pack the line is spoken
-  from, so changing the interface language cannot desynchronise them.
-- The status bar position is remembered between sessions.
-- Fixed the minimap icon.
+- 兼容 1.18 / 3.3.5a / 2.4.3；字幕始终跟随语音语言。
 
 ## 1.9.1
-- Chinese and English voice packs, with captions in the language you hear.
+- 中英文语音包与对应字幕。
 
 ## 1.9.0
-- First release.
+- 首个版本。

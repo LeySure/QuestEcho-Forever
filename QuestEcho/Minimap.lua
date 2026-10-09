@@ -21,6 +21,43 @@ local function profile()
     return QE.Addon.db and QE.Addon.db.profile
 end
 
+local function OpenOptions()
+    local O = QE.OptionsUI
+    if O and O.Open then
+        pcall(O.Open, O)
+    elseif O and O.Toggle then
+        pcall(O.Toggle, O)
+    end
+end
+
+-- 右键菜单: 艾泽拉斯地区介绍 / 设置。客户端没有菜单系统时退回直接打开设置。
+local menuFrame
+local function OpenMenu()
+    local hasMenu = (type(EasyMenu) == "function"
+        and type(UIDropDownMenu_Initialize) == "function")
+    if not hasMenu then
+        OpenOptions()
+        return
+    end
+    if not menuFrame then
+        menuFrame = CreateFrame("Frame", "QuestEchoMinimapMenu", UIParent, "UIDropDownMenuTemplate")
+    end
+    local L = QE.L or function(en, zh) return zh or en end
+    local menu = {
+        { text = L("Azeroth Zone Introductions", "艾泽拉斯地区介绍"), notCheckable = true, func = function()
+            if QE.ZoneBrowser and QE.ZoneBrowser.Toggle then
+                QE.ZoneBrowser:Toggle()
+            end
+        end },
+        { text = L("Settings", "设置"), notCheckable = true, func = OpenOptions },
+    }
+    local ok = pcall(EasyMenu, menu, menuFrame, "cursor", 0, 0, "MENU", 2)
+    if not ok then
+        pcall(HideDropDownMenu, 1)
+        OpenOptions()
+    end
+end
+
 local function UpdatePosition(button)
     local p = profile()
     local angle = math.rad((p and p.MinimapAngle) or 225)
@@ -74,11 +111,12 @@ function MinimapButton:Create()
     overlay:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
     button.Border = overlay
 
+    -- 右键弹菜单(艾泽拉斯地区介绍 / 设置), 左键暂停/继续。
     button:SetScript("OnClick", function(_, mouseButton)
         if mouseButton == "RightButton" then
-            if QE.SoundQueue then QE.SoundQueue:TogglePauseQueue() end
-        elseif QE.OptionsUI then
-            QE.OptionsUI:Toggle()
+            OpenMenu()
+        elseif QE.SoundQueue then
+            QE.SoundQueue:TogglePauseQueue()
         end
     end)
     button:SetScript("OnEnter", function(self)
@@ -86,8 +124,8 @@ function MinimapButton:Create()
         local zh = (loc == "zhCN" or loc == "zhTW")
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:SetText("QuestEcho")
-        GameTooltip:AddLine(zh and "左键：设置　右键：暂停/继续　拖动：移动"
-                                or "Left-click: settings  Right-click: pause/resume  Drag: move",
+        GameTooltip:AddLine(zh and "左键：暂停/继续　右键：菜单　拖动：移动"
+                                or "Left-click: pause/resume  Right-click: menu  Drag: move",
             1, 1, 1, true)
         GameTooltip:Show()
     end)

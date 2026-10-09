@@ -1,12 +1,14 @@
-## Interface: 121000, 120100, 120007, 50504, 40402, 38002, 30405, 20506, 16001, 11509, 30300, 11200
+## Interface: 121000, 120100, 120007, 50504, 40402, 38002, 30405, 20506, 16001, 11509, 11200, 8606, 30300
 ## Title: QuestEcho
 ## Title-zhCN: QuestEcho（任务语音）
 ## Notes: Quest voice lines, captions and a playback queue
 ## Notes-zhCN: 任务语音、字幕与播放队列（三端通用）
 ## Author: Leysure
-## Version: 1.9.9
+## Version: 2.2.6
 ## SavedVariables: QuestEchoDB
 ## IconTexture: Interface\AddOns\QuestEcho\QuestEchoIcon.tga
+## AddonCompartment: QuestEcho_OnCompartmentClick
+## AddonCompartment-zhCN: QuestEcho_OnCompartmentClick
 QuestEcho112.lua
 npc_race_lookups.lua
 QuestTitleMap.lua
@@ -15,6 +17,11 @@ GossipTitleMap.lua
 GossipTitleMapData.lua
 GossipTitleMapData2.lua
 Core.lua
+OptionsUI.lua
+Books.lua
+ZoneIntro.lua
+ZoneBrowser.lua
+Welcome.lua
 ItemGameObject.lua
 Minimap.lua
 Harvest.lua

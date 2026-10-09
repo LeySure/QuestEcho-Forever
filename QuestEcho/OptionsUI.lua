@@ -1,0 +1,1202 @@
+-- OptionsUI.lua
+--
+-- QuestEcho 的设置面板(2.0.1)。三页: 主设置 / 主要设置 / 朗读设置。
+-- 有 Settings API 的客户端(正式服、怀旧服、无限服)把整块画布注册进客户端自带的
+-- 插件选项列表; 1.12 / 2.4.3 / 3.3.5 没有这个 API, 同一个画布就当普通窗口用。
+--
+-- 放在单独文件里的原因: Core.lua 主块的 local 已经逼近 Lua 200 的上限, 再加
+-- 控件就会静默不加载整个插件(屏幕无任何报错, 只写 Logs/FrameXML.log)。
+local QE = QuestEcho
+if not QE or not QE.Addon then return end
+
+local OptionsUI = QE.OptionsUI or {}
+QE.OptionsUI = OptionsUI
+local Addon = QE.Addon
+local CAP = QE.CAP or {}
+local L = QE.L or function(en, zh) return zh or en end
+local Print = QE.Print or function(m) DEFAULT_CHAT_FRAME:AddMessage(tostring(m)) end
+local MakeButton = QE.MakeButton
+local MakeCheck = QE.MakeCheck
+local AddClickFallback = QE.AddClickFallback
+local AttachTooltip = QE.AttachTooltip
+local CreatePanelFrame = QE.CreatePanelFrame
+
+local function P(name, fn)
+    local ok, err = pcall(fn)
+    if not ok then
+        Print("[QuestEcho] 设置控件失败: " .. tostring(name) .. " -> " .. tostring(err))
+    end
+    return ok
+end
+
+-- =============================================================================
+-- 链接。官网是玩家补台词的地方, B 站是更新动态, QQ 群是答疑。
+-- =============================================================================
+local LINKS = {
+    site     = "https://questecho.dpdns.org/index.html",
+    siteRoot = "https://questecho.dpdns.org/",
+    download = "https://questecho.dpdns.org/addons.html",
+    bilibili = "https://space.bilibili.com/85433416",
+    qq       = "623122867",
+    qqTip    = "QQ群 623122867（验证：questecho）",
+}
+
+-- 复制用的小窗口: 客户端没有给我们写剪贴板的接口, 只能把链接放进一个已经全选的
+-- 输入框让玩家 Ctrl+C。有 EditBox 高亮的客户端直接选中, 没有的至少能看到地址。
+local function ShowCopyPopup(title, value)
+    local frame = _G["QuestEchoCopyFrame"]
+    if not frame then
+        frame = CreateFrame("Frame", "QuestEchoCopyFrame", UIParent)
+        frame:SetSize(420, 130)
+        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
+        frame:SetFrameStrata("DIALOG")
+        frame:SetMovable(true)
+        frame:EnableMouse(true)
+        frame:RegisterForDrag("LeftButton")
+        frame:SetScript("OnDragStart", function(f) f:StartMoving() end)
+        frame:SetScript("OnDragStop", function(f) f:StopMovingOrSizing() end)
+        if CreatePanelFrame then
+            -- reuse the same look as the rest of the addon
+            local bg = frame:CreateTexture(nil, "BACKGROUND")
+            bg:SetAllPoints()
+            if QE.Tint then QE.Tint(bg, 0.05, 0.05, 0.08, 0.97) end
+        end
+        local head = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        head:SetPoint("TOP", frame, "TOP", 0, -10)
+        head:SetTextColor(1, 0.82, 0)
+        frame.title = head
+
+        local box = CreateFrame("EditBox", nil, frame)
+        box:SetSize(380, 26)
+        box:SetPoint("TOP", frame, "TOP", 0, -44)
+        box:SetFontObject(GameFontHighlight)
+        box:SetAutoFocus(false)
+        local edge = box:CreateTexture(nil, "BACKGROUND")
+        edge:SetAllPoints()
+        if QE.Tint then QE.Tint(edge, 0.12, 0.12, 0.15, 1) end
+        box:SetTextInsets(6, 6, 0, 0)
+        box:SetScript("OnEscapePressed", function(self) self:GetParent():Hide() end)
+        box:SetScript("OnEnterPressed", function(self) self:GetParent():Hide() end)
+        frame.box = box
+
+        local note = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        note:SetPoint("TOP", frame, "TOP", 0, -76)
+        note:SetText(L("Press Ctrl+C to copy, then paste into your browser.",
+                       "按 Ctrl+C 复制, 再粘到浏览器打开。"))
+        note:SetTextColor(0.75, 0.75, 0.75)
+
+        local close = MakeButton and MakeButton(frame, 100, 22, L("Close", "关闭"), function()
+            frame:Hide()
+        end)
+        if close then close:SetPoint("BOTTOM", frame, "BOTTOM", 0, 10) end
+        table.insert(UISpecialFrames, "QuestEchoCopyFrame")
+    end
+    frame.title:SetText(title or L("Copy link", "复制链接"))
+    frame.box:SetText(value or "")
+    frame:Show()
+    if frame.box.SetFocus then pcall(function() frame.box:SetFocus() end) end
+    if frame.box.HighlightText then pcall(function() frame.box:HighlightText() end) end
+end
+QE.ShowCopyPopup = ShowCopyPopup
+
+-- =============================================================================
+-- 朗读时降低其它声音(ducking)。
+--
+-- 只改 CVar 音量, 不改 Enable*; 语音自己所在的通道永不动; 每条被改的通道都先记下
+-- 原值, 退出登录 / reload 时无条件还原, 上次没退干净的(崩了)下次登录也还原。
+-- 老客户端(1.12)没有 GetCVar/SetCVar, 3.3.5a / 2.4.3 的语音走音乐通道本身,
+-- 这两种情况都不提供这个开关。
+-- =============================================================================
+local LowerSounds = {}
+QE.LowerSounds = LowerSounds
+local LS_CHANNELS = { "Music", "Ambience", "SFX", "Dialog" }
+local LS_FADE, LS_STEP, LS_SETTLE = 0.6, 0.05, 1.2
+local lsOriginal, lsApplied = {}, {}
+
+local function lsCVar(ch) return "Sound_" .. ch .. "Volume" end
+local function lsRead(ch)
+    local ok, v = pcall(GetCVar, lsCVar(ch))
+    return tonumber(ok and v or nil) or 1
+end
+local function lsWrite(ch, v)
+    pcall(SetCVar, lsCVar(ch), v)
+    lsApplied[ch] = lsRead(ch)
+end
+
+function LowerSounds:IsAvailable()
+    return type(GetCVar) == "function" and type(SetCVar) == "function"
+        and CAP.soundHandle ~= false
+end
+
+local function lsPersist()
+    local copy = {}
+    for ch, v in pairs(lsOriginal) do copy[ch] = v end
+    if Addon.db and Addon.db.global then Addon.db.global.LoweredVolumes = copy end
+end
+
+local function lsRelease()
+    for ch, v in pairs(lsApplied) do
+        if math.abs(lsRead(ch) - v) > 0.005 then
+            lsOriginal[ch], lsApplied[ch] = nil, nil
+        end
+    end
+end
+
+function LowerSounds:VoiceChannel()
+    return CAP.normalizeChannel and CAP.normalizeChannel(
+        Addon.db.profile.AudioChannel) or "Master"
+end
+
+function LowerSounds:Targets()
+    local amount = tonumber(Addon.db.profile.LowerAmount) or 0.35
+    if amount < 0 then amount = 0 end
+    if amount > 1 then amount = 1 end
+    local voice, out = self:VoiceChannel(), {}
+    for ch, v in pairs(lsOriginal) do
+        out[ch] = (ch == voice) and v or (v * amount)
+    end
+    return out
+end
+
+function LowerSounds:Lower()
+    if not self.lowered then
+        self.lowered = true
+        lsOriginal, lsApplied = {}, {}
+        for i = 1, table.getn(LS_CHANNELS) do
+            lsOriginal[LS_CHANNELS[i]] = lsRead(LS_CHANNELS[i])
+        end
+        lsPersist()
+    end
+    self.fadeFrom, self.fadeTo, self.fadeProgress = {}, self:Targets(), 0
+    for ch in pairs(lsOriginal) do
+        if self.fadeTo[ch] and self.fadeTo[ch] ~= lsRead(ch) then
+            self.fadeFrom[ch] = lsRead(ch)
+        else
+            lsApplied[ch] = lsRead(ch)
+        end
+    end
+    self.fadeDone = nil
+    if self.watcher then self.watcher:Show() end
+end
+
+function LowerSounds:Restore(immediately)
+    if not self.lowered then return end
+    self.fadeFrom, self.fadeProgress = {}, 0
+    self.fadeTo = {}
+    for ch, v in pairs(lsOriginal) do self.fadeTo[ch] = v end
+    -- 起点必须逐通道读一遍: 只写 fadeTo 而 fadeFrom 是空表的话, 淡出过程一个通道
+    -- 都不会动, 音量就永远停在压低后的值上。
+    for ch in pairs(lsOriginal) do
+        local cur = lsRead(ch)
+        if self.fadeTo[ch] ~= cur then self.fadeFrom[ch] = cur end
+    end
+    self.fadeDone = function()
+        self.lowered = false
+        lsOriginal, lsApplied = {}, {}
+        if Addon.db and Addon.db.global then Addon.db.global.LoweredVolumes = nil end
+    end
+    if immediately then
+        lsRelease()
+        for ch, v in pairs(self.fadeTo) do lsWrite(ch, v) end
+        self.fadeDone()
+        self.fadeDone = nil
+        if self.watcher then self.watcher:Hide() end
+        return
+    end
+    if self.watcher then self.watcher:Show() end
+end
+
+function LowerSounds:Step(delta)
+    if not self.fadeTo then return end
+    self.fadeProgress = self.fadeProgress + (delta / LS_FADE)
+    if self.fadeProgress > 1 then self.fadeProgress = 1 end
+    lsRelease()
+    for ch, start in pairs(self.fadeFrom) do
+        if lsOriginal[ch] then
+            lsWrite(ch, start + ((self.fadeTo[ch] or start) - start) * self.fadeProgress)
+        end
+    end
+    if self.fadeProgress >= 1 then
+        self.fadeTo, self.fadeFrom = nil, nil
+        if self.fadeDone then
+            local done = self.fadeDone
+            self.fadeDone = nil
+            done()
+        end
+        if self.watcher and not self.lowered then self.watcher:Hide() end
+    end
+end
+
+-- 队列里有声音在放就压低, 空了(并静置 1.2 秒)就还原。用一个慢速 OnUpdate 轮询,
+-- 比往 Core.lua 的队列里插回调安全。
+function LowerSounds:Sync()
+    if not self:IsAvailable() then return end
+    local sq = QE.SoundQueue
+    local playing = sq and sq.IsPlaying and sq:IsPlaying() and true or false
+    local cfg = Addon.db.profile
+    if cfg.LowerOthers and playing then
+        self.settle = nil
+        if not self.lowered or self.fadeDone then self:Lower() end
+    elseif self.lowered and not self.fadeDone then
+        self.settle = (self.settle or 0) + LS_STEP * 4
+        if self.settle >= LS_SETTLE then
+            self.settle = nil
+            self:Restore()
+        end
+    end
+end
+
+function LowerSounds:RefreshConfig()
+    if self.lowered and Addon.db.profile.LowerOthers then
+        self.fadeFrom, self.fadeProgress = {}, 0
+        self.fadeTo = self:Targets()
+        for ch in pairs(lsOriginal) do
+            if self.fadeTo[ch] and self.fadeTo[ch] ~= lsRead(ch) then
+                self.fadeFrom[ch] = lsRead(ch)
+            end
+        end
+        if self.watcher then self.watcher:Show() end
+    else
+        self:Sync()
+    end
+end
+
+function LowerSounds:RestoreLeftovers()
+    local leftover = Addon.db and Addon.db.global and Addon.db.global.LoweredVolumes
+    if type(leftover) ~= "table" or self.lowered then return end
+    for ch, v in pairs(leftover) do
+        if tonumber(v) then pcall(SetCVar, lsCVar(ch), v) end
+    end
+    Addon.db.global.LoweredVolumes = nil
+end
+
+-- 轮询器: 淡入淡出 + 每 0.2 秒看一眼队列。
+local lsWatcher = CreateFrame("Frame")
+lsWatcher:Hide()
+local lsElapsed = 0
+lsWatcher:SetScript("OnUpdate", function(_, delta)
+    LowerSounds:Step(delta or 0)
+    lsElapsed = lsElapsed + (delta or 0)
+    if lsElapsed >= 0.2 then
+        lsElapsed = 0
+        LowerSounds:Sync()
+    end
+end)
+LowerSounds.watcher = lsWatcher
+
+local lsEvents = CreateFrame("Frame")
+lsEvents:RegisterEvent("PLAYER_LOGIN")
+lsEvents:RegisterEvent("PLAYER_LOGOUT")
+lsEvents:SetScript("OnEvent", function(_, event)
+    event = event or _G.event
+    if event == "PLAYER_LOGOUT" then
+        if LowerSounds.lowered then LowerSounds:Restore(true) end
+    elseif Addon.db and LowerSounds:IsAvailable() then
+        LowerSounds:RestoreLeftovers()
+        if Addon.db.profile.LowerOthers then lsWatcher:Show() end
+    end
+end)
+
+-- =============================================================================
+-- 控件工厂
+-- =============================================================================
+local PAGE_W, PAGE_H = 660, 560
+
+local function FontString(parent, font, r, g, b)
+    local fs = parent:CreateFontString(nil, "OVERLAY", font or "GameFontHighlight")
+    if r then fs:SetTextColor(r, g, b) end
+    return fs
+end
+
+-- 一行的容器: 排版和搜索都按"行"来移动, 控件相对行定位, 这样藏掉一行不会把
+-- 面板撕成碎片。
+local function NewPage(parent)
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetSize(PAGE_W, PAGE_H)
+    page:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -76)
+    page.entries = {}
+    return page
+end
+
+local function AddEntry(page, frame, kind, text)
+    local entry = { frame = frame, kind = kind or "row", text = text or "", hidden = false }
+    table.insert(page.entries, entry)
+    return entry
+end
+
+local function Relayout(page)
+    local y = -6
+    local deepest = 0
+    for i = 1, table.getn(page.entries) do
+        local e = page.entries[i]
+        if e.hidden then
+            e.frame:Hide()
+        else
+            e.frame:ClearAllPoints()
+            e.frame:SetPoint("TOPLEFT", page, "TOPLEFT", 0, y)
+            e.frame:Show()
+            local h = e.frame:GetHeight() or 22
+            if (y - h) < deepest then deepest = y - h end
+            y = y - h - (e.kind == "section" and 8 or 4)
+        end
+    end
+    -- 记下这一页真实占用的高度。行高不是写死的：说明文字按实际折行结果撑高，
+    -- 字体被替换过的客户端量出来的行高也会和预期不同。窗口高度按三页的最大值
+    -- 现算，最后一行就不会掉出窗口底部。
+    page.need = (-deepest) + 16
+end
+
+local function Section(page, text)
+    local row = CreateFrame("Frame", nil, page)
+    row:SetSize(PAGE_W - 16, 24)
+    local fs = FontString(row, "GameFontNormal", 1, 0.82, 0)
+    fs:SetPoint("TOPLEFT", row, "TOPLEFT", 4, -4)
+    if fs.SetWordWrap then fs:SetWordWrap(false) end
+    -- 显式给宽：个别客户端（字体被替换过的 335）对"宽度靠自动推算"的文字会算歪、
+    -- 只显示头一两个字；给一个足够宽的定宽反而不会截断。
+    -- 但给宽以后必须显式左对齐：FontString 默认是居中，定宽后文字会跑到行的
+    -- 正中间，和右边的文字叠在一起（"字挤到一起"就是这么来的）。
+    fs:SetJustifyH("LEFT")
+    if fs.SetWidth then fs:SetWidth(PAGE_W - 32) end
+    fs:SetText(text)
+    local line = row:CreateTexture(nil, "ARTWORK")
+    line:SetHeight(1)
+    line:SetPoint("LEFT", row, "LEFT", 4, 0)
+    line:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    line:SetPoint("TOP", row, "TOP", 0, -20)
+    if QE.Tint then QE.Tint(line, 0.35, 0.30, 0.22, 0.7) end
+    return AddEntry(page, row, "section", text)
+end
+
+local function Note(page, text, height)
+    local row = CreateFrame("Frame", nil, page)
+    row:SetSize(PAGE_W - 16, height or 34)
+    local fs = FontString(row, "GameFontHighlightSmall", 0.78, 0.78, 0.78)
+    fs:SetPoint("TOPLEFT", row, "TOPLEFT", 6, -2)
+    fs:SetPoint("RIGHT", row, "RIGHT", -6, 0)
+    fs:SetJustifyH("LEFT")
+    fs:SetText(text)
+    -- 行高按实际折行结果兜底。客户端字体的宽度和预期不一致时，固定行高装不下的
+    -- 那部分会溢到下一节，看起来像两块内容叠在一起 —— 这里量出来就撑高。
+    if fs.GetHeight then
+        local h = fs:GetHeight() or 0
+        if h > 0 and h + 4 > (row:GetHeight() or 0) then
+            row:SetHeight(h + 4)
+        end
+    end
+    local e = AddEntry(page, row, "note", text)
+    -- 记下这个字体串，窗口显示出来以后还要照真实折行高度再撑一次（见 RetouchNotes）。
+    e.fs = fs
+    return e
+end
+
+local function Check(page, label, getter, setter, tooltip, extra)
+    local row = CreateFrame("Frame", nil, page)
+    row:SetSize(PAGE_W - 16, 22)
+    local c = MakeCheck(row, 6, -1, label, getter, setter, extra, tooltip)
+    -- 勾选项文字同样显式给宽，避免个别客户端把整句截成"两个字加省略号"。
+    if c.qeLabel and c.qeLabel.SetWidth then c.qeLabel:SetWidth(PAGE_W - 60) end
+    -- MakeCheck 自带 SetChecked/GetChecked, 但值可能在外面被改(恢复默认),
+    -- 统一交给下面的 Refresh 走一遍。
+    row.check = c
+    local e = AddEntry(page, row, "row", label)
+    e.refresh = function()
+        if c.qeMark then
+            if getter() then c.qeMark:Show() else c.qeMark:Hide() end
+        end
+    end
+    return e
+end
+
+local function RowLabel(row, text)
+    local fs = FontString(row, "GameFontNormal", 1, 0.82, 0)
+    fs:SetPoint("LEFT", row, "LEFT", 8, 0)
+    if fs.SetWordWrap then fs:SetWordWrap(false) end
+    -- 定宽给到行程大半（标签本身都很短，视觉上碰不到右边的按钮/滑条）。
+    -- 给宽必须配上左对齐：FontString 默认居中，定宽后标签会滑到行中间，
+    -- 和 "< >" 按钮、右侧取值挤成一团。
+    fs:SetJustifyH("LEFT")
+    if fs.SetWidth then fs:SetWidth(PAGE_W - 180) end
+    fs:SetText(text)
+    return fs
+end
+
+-- 下拉菜单在 1.12/2.4.3/3.3.5 上直接不可用(UIDropDownMenu.lua 会崩), 所以用
+-- "< 值 >" 三件套循环切换。
+local function Cycle(page, label, values, getIndex, setValue, tooltip)
+    local row = CreateFrame("Frame", nil, page)
+    row:SetSize(PAGE_W - 16, 22)
+    RowLabel(row, label)
+    local current = getIndex()
+    local value = FontString(row, "GameFontHighlight", 1, 0.84, 0.2)
+    -- 取值起点跟 "< >" 之间留出空隙：贴太近时中文第一个字会看着压到 ">" 上
+    -- （个别客户端字体更宽，4px 的缝根本不够看）。
+    value:SetPoint("LEFT", row, "LEFT", 264, 0)
+    -- 显式给宽（比最长取值还宽）并关折行：个别客户端对"靠自动推算宽度"的文字会算歪、
+    -- 截成省略号；写死一个宽敞的宽度就能完整显示（行高 22，折行会压到下一行上）。
+    if value.SetWordWrap then value:SetWordWrap(false) end
+    if value.SetWidth then value:SetWidth(PAGE_W - 264 - 16) end
+    value:SetJustifyH("LEFT")
+    local function render()
+        local v = values[current]
+        value:SetText(v and v.text or "?")
+        if v and v.note then value:SetText((v.text or "?") .. "  |cff999999" .. v.note .. "|r") end
+    end
+    local prev = MakeButton(row, 24, 20, "<", function()
+        current = current - 1
+        if current < 1 then current = table.getn(values) end
+        setValue(values[current].value)
+        render()
+    end)
+    prev:SetPoint("LEFT", row, "LEFT", 176, 0)
+    local nxt = MakeButton(row, 24, 20, ">", function()
+        current = current + 1
+        if current > table.getn(values) then current = 1 end
+        setValue(values[current].value)
+        render()
+    end)
+    nxt:SetPoint("LEFT", row, "LEFT", 202, 0)
+    render()
+    if tooltip then
+        AttachTooltip(prev, tooltip)
+        AttachTooltip(nxt, tooltip)
+        AttachTooltip(value, tooltip)
+    end
+    local e = AddEntry(page, row, "row", label)
+    e.refresh = function()
+        current = getIndex()
+        render()
+    end
+    return e
+end
+
+-- OptionsSliderTemplate 自带的三个占位文字是 "$parentLow" / "$parentHigh" /
+-- "$parentText" 这种命名 region，父控件得有名字才能从 _G 查到并清掉。所以滑条
+-- 不再匿名创建，统一从这里领一个唯一名字（重复 Setup 时名字会撞，往后顺延）。
+local sliderSeq = 0
+local function NewSliderName()
+    sliderSeq = sliderSeq + 1
+    local nm = "QuestEchoOptionsSlider" .. sliderSeq
+    while _G[nm] do
+        sliderSeq = sliderSeq + 1
+        nm = "QuestEchoOptionsSlider" .. sliderSeq
+    end
+    return nm
+end
+
+-- 滑条: 有 OptionsSliderTemplate 就用, 没有就退化成 "< 值 >"。
+-- fmt 管数值长什么样, unit 是跟在后面的单位(" 秒")。滑条正下方常驻一行当前值,
+-- 拖动时跟着动, 不用猜拖到哪一档了。两端的极值挪到滑条左右两侧, 给当前值腾地方。
+local function Slider(page, label, minV, maxV, step, getter, setter, tooltip, fmt, unit)
+    local row = CreateFrame("Frame", nil, page)
+    row:SetSize(PAGE_W - 16, 54)
+    local function shown(v)
+        local t = (fmt and fmt(v)) or tostring(v)
+        if unit then t = t .. unit end
+        return t
+    end
+    local ok, slider = pcall(CreateFrame, "Slider", NewSliderName(), row, "OptionsSliderTemplate")
+    if not (ok and slider and slider.SetMinMaxValues) then
+        -- 退化路径: 用整数档位循环
+        local values = {}
+        local i = 0
+        while minV + i * step <= maxV + 0.0001 and i < 40 do
+            values[table.getn(values) + 1] = { value = minV + i * step,
+                text = shown(minV + i * step) }
+            i = i + 1
+        end
+        local function getIndex()
+            local cur = tonumber(getter()) or minV
+            local best, bestD = 1, 1e9
+            for k = 1, table.getn(values) do
+                local d = math.abs(values[k].value - cur)
+                if d < bestD then best, bestD = k, d end
+            end
+            return best
+        end
+        return Cycle(page, label, values, getIndex, function(v) setter(v) end, tooltip)
+    end
+    slider:SetPoint("LEFT", row, "LEFT", 200, 0)
+    slider:SetWidth(240)
+    slider:SetMinMaxValues(minV, maxV)
+    slider:SetValueStep(step)
+    pcall(slider.SetObeyStepOnDrag, slider, true)
+    -- OptionsSliderTemplate 自带 Low / High / Text 三个占位文字（XML 里写的是
+    -- LOW / HIGH，在中文客户端上显示成"低"/"高"），锚在滑条下方两端，和这里
+    -- 自绘的极值、读数叠成两套字。三个占位都是命名 region（$parentLow 这类），
+    -- 上面创建滑条时已经给了名字，所以从 _G 查名字就能拿到。拿不到就安静跳过。
+    do
+        local nm = slider.GetName and slider:GetName() or nil
+        local subs = { nil, nil, nil }
+        if nm then
+            subs[1], subs[2], subs[3] = _G[nm .. "Low"], _G[nm .. "High"], _G[nm .. "Text"]
+        end
+        for i = 1, table.getn(subs) do
+            local f = subs[i]
+            -- 只碰真正的控件：名字万一被别的东西占用（取到函数），后面那句
+            -- "取 SetText 再调用"会在取值时就报错，先按类型挡掉。
+            if f ~= nil and type(f) ~= "function" then
+                pcall(f.SetText, f, "")
+            end
+        end
+    end
+    -- 两端极值用 12px 那档字体: 这里显示的是纯数字, 而这个客户端 10px 那档
+    -- 对个别数字栅格化会糊成怪字形, 12px 那档是好的。
+    local low = FontString(slider, "GameFontHighlight", 0.8, 0.8, 0.8)
+    low:SetPoint("RIGHT", slider, "LEFT", -6, 0)
+    low:SetText(fmt and fmt(minV) or tostring(minV))
+    local high = FontString(slider, "GameFontHighlight", 0.8, 0.8, 0.8)
+    high:SetPoint("LEFT", slider, "RIGHT", 6, 0)
+    high:SetText(fmt and fmt(maxV) or tostring(maxV))
+    local readout = FontString(slider, "GameFontHighlight", 1, 0.84, 0.2)
+    readout:SetPoint("TOP", slider, "BOTTOM", 0, -3)
+    -- 标签只在行左边写一次(行内 RowLabel), 不在滑条上方再写一遍: 两处同名标签
+    -- 叠在一起看着像有两个设置项。
+    RowLabel(row, label)
+    local function apply(v)
+        readout:SetText(shown(v))
+    end
+    slider:SetScript("OnValueChanged", function(_, v)
+        apply(v)
+        setter(v)
+    end)
+    AttachTooltip(slider, tooltip)
+    local e = AddEntry(page, row, "row", label)
+    e.refresh = function()
+        local v = tonumber(getter()) or minV
+        slider:SetValue(v)
+        apply(slider:GetValue())
+    end
+    local start = tonumber(getter()) or minV
+    slider:SetValue(start)
+    apply(slider:GetValue())
+    return e
+end
+
+local function Button(page, label, width, onClick, tooltip)
+    local row = CreateFrame("Frame", nil, page)
+    row:SetSize(PAGE_W - 16, 26)
+    local b = MakeButton(row, width or 180, 22, label, onClick)
+    b:SetPoint("LEFT", row, "LEFT", 8, 0)
+    AttachTooltip(b, tooltip)
+    return AddEntry(page, row, "row", label)
+end
+
+-- =============================================================================
+-- 三个分页的内容
+-- =============================================================================
+local pages = {}
+local refreshers = {}
+
+local function VoicePackState()
+    local dm = QE.DataModules
+    if not dm or not dm.LangModuleExists then return false, false end
+    return dm:LangModuleExists("zhCN"), dm:LangModuleExists("enUS")
+end
+
+local function BuildHome(page)
+    Section(page, L("Contribute", "一起完善语音"))
+    Note(page, L("QuestEcho reads the official lines. Where a line has no voice yet you can record or check it on the site — every correction helps every player.",
+                 "QuestEcho 念的是官方台词。缺语音的台词可以在官网上补齐或校对, 你改一条, 所有用到这条的玩家都受益。"),
+        46)
+    Button(page, L("Open the site (copy link)", "打开官网（复制链接）"), 220, function()
+        ShowCopyPopup("QuestEcho " .. L("site", "官网"), LINKS.siteRoot)
+    end, L("Opens a small window with the address selected; press Ctrl+C.",
+           "弹出一个小窗口并全选地址, 按 Ctrl+C 复制。"))
+
+    Section(page, L("Links", "链接"))
+    -- "官方网站"按钮已删: 和上一节的"打开官网（复制链接）"指向同一个站, 重复了。
+    Button(page, L("Bilibili", "B 站动态"), 220, function()
+        ShowCopyPopup("Bilibili", LINKS.bilibili)
+    end)
+    Button(page, LINKS.qqTip, 260, function()
+        ShowCopyPopup(L("QQ group", "QQ 群"), LINKS.qq)
+    end, L("Copy the group number and search for it in QQ.", "复制群号后在 QQ 里搜索加群。"))
+
+    Section(page, L("Welcome window", "欢迎窗口"))
+    Note(page, L("The welcome window shows once per account. Reopen it at any time.",
+                 "欢迎窗口每个账号只弹一次, 随时可以再打开。"), 30)
+    Button(page, L("Reopen the welcome window", "重新打开欢迎窗口"), 220, function()
+        if QE.Welcome and QE.Welcome.Show then QE.Welcome:Show() end
+        OptionsUI:Hide()
+    end)
+end
+
+local LANGS = {
+    { value = "auto",        text = L("Auto (client language)", "自动（跟随客户端）") },
+    { value = "zhCN",        text = L("Mandarin", "普通话") },
+    { value = "enUS",        text = L("English", "英语") },
+    { value = "zhCN-sichuan", text = L("Sichuanese", "四川话"), note = L("coming soon", "敬请期待") },
+    { value = "zhCN-yue",    text = L("Cantonese", "粤语"),     note = L("coming soon", "敬请期待") },
+    { value = "zhCN-shanghai", text = L("Shanghainese", "上海话"), note = L("coming soon", "敬请期待") },
+    { value = "zhCN-dongbei", text = L("Northeastern", "东北话"), note = L("coming soon", "敬请期待") },
+    { value = "zhCN-henan",  text = L("Henan", "河南话"),       note = L("coming soon", "敬请期待") },
+    { value = "zhCN-shandong", text = L("Shandong", "山东话"),  note = L("coming soon", "敬请期待") },
+}
+
+local CHANNELS = {
+    { value = "MASTER",   text = L("Master", "主音量") },
+    { value = "SFX",      text = L("Sound effects", "音效") },
+    { value = "MUSIC",    text = L("Music", "音乐") },
+    { value = "AMBIENCE", text = L("Ambience", "环境音") },
+    { value = "DIALOG",   text = L("Dialog", "对话") },
+}
+
+local STYLES = {
+    { value = true,  text = L("Show the status bar", "显示状态栏") },
+    { value = false, text = L("Hide the status bar", "隐藏状态栏") },
+}
+
+local function IndexOf(values, current)
+    for i = 1, table.getn(values) do
+        if values[i].value == current then return i end
+    end
+    return 1
+end
+
+-- 间隔按 0.25 秒一档, 显示时把多余的 0 抹掉: 0 / 0.25 / 0.5 / 1 / 1.75
+local function SecFmt(v)
+    local s = string.format("%.2f", tonumber(v) or 0)
+    s = string.gsub(s, "0+$", "")
+    s = string.gsub(s, "%.$", "")
+    return s
+end
+
+local function BuildGeneral(page)
+    Section(page, L("General", "通用"))
+    Button(page, L("Restore defaults", "恢复默认设置"), 200, function()
+        local defaults = Addon:GetDefaults()
+        for k, v in pairs(defaults.profile) do
+            if k ~= "MinimapAngle" then Addon.db.profile[k] = v end
+        end
+        Print("[QuestEcho] " .. L("settings restored", "设置已恢复默认"))
+        if QE.SoundQueueUI then
+            if QE.SoundQueueUI.Update then pcall(QE.SoundQueueUI.Update, QE.SoundQueueUI) end
+            if QE.SoundQueueUI.ApplyLayout then pcall(QE.SoundQueueUI.ApplyLayout, QE.SoundQueueUI) end
+        end
+        if QE.Minimap and QE.Minimap.ApplySettings then pcall(QE.Minimap.ApplySettings, QE.Minimap) end
+        OptionsUI:RefreshAll()
+    end, L("Every setting on these pages goes back to its default. Saved frame positions are kept.",
+           "这两页的所有设置回到默认值, 已保存的界面位置不变。"))
+
+    Section(page, L("Status bar", "状态栏"))
+    Cycle(page, L("Status bar", "状态栏"), STYLES,
+        function() return IndexOf(STYLES, Addon.db.profile.ShowUI and true or false) end,
+        function(v)
+            Addon.db.profile.ShowUI = v
+            if QE.SoundQueueUI and QE.SoundQueueUI.Update then
+                pcall(QE.SoundQueueUI.Update, QE.SoundQueueUI)
+            end
+        end,
+        L("The status bar shows what is playing and holds the queue. Hide it for voice only.",
+          "状态栏显示正在播放的台词和播放队列, 隐藏它就只剩语音。"))
+    Check(page, L("Show captions", "显示字幕"),
+        function() return Addon.db.profile.Captions end,
+        function(v) Addon.db.profile.Captions = v end,
+        L("Write the line being spoken on the status bar.",
+          "把正在念的台词写在状态栏上。"))
+    Check(page, L("Hide the status bar when reading ends", "朗读结束后隐藏状态栏"),
+        function() return Addon.db.profile.HideAfterDone end,
+        function(v)
+            Addon.db.profile.HideAfterDone = v
+            -- 关掉开关时, 状态栏可能正被"念完收起"藏着, 立刻恢复出来,
+            -- 否则玩家会把"开关关了"误认成"栏没了"。
+            if not v and QE.SoundQueueUI and QE.SoundQueueUI.Update then
+                pcall(QE.SoundQueueUI.Update, QE.SoundQueueUI)
+            end
+        end,
+        L("Fold the bar away once the last line has been spoken. It comes back on its own when the next line starts.",
+          "最后一条念完后自动收起状态栏, 下一条开始时自己再出来。"))
+
+    Section(page, L("Voice", "语音"))
+    Cycle(page, L("Voice language", "语音语言"), LANGS,
+        function() return IndexOf(LANGS, Addon.db.profile.VoiceLang or "auto") end,
+        function(v)
+            Addon.db.profile.VoiceLang = v
+            if RefreshQuestEchoButtons then pcall(RefreshQuestEchoButtons) end
+        end,
+        L("Which voice pack plays. Dialect packs are not out yet; until one is installed the Chinese pack is used.",
+          "选择播放哪个语音包。方言包还没发布, 没装时自动回落到普通话。"))
+    if CAP.modernApi then
+        Cycle(page, L("Sound channel", "声音通道"), CHANNELS,
+            function() return IndexOf(CHANNELS, Addon.db.profile.AudioChannel or "MASTER") end,
+            function(v) Addon.db.profile.AudioChannel = v end,
+            L("Which of the game's volume sliders the voice follows.",
+              "语音跟随游戏设置里的哪一条音量滑条。"))
+    else
+        Note(page, L("This client has one sound channel only; the voice follows the master volume slider.",
+                     "这个客户端只有一条声音通道, 语音跟随主音量滑条。"), 30)
+    end
+    Slider(page, L("Gap between voices (sec)", "台词间隔（秒）"), 0, 3, 0.25,
+        -- 老存档里可能还留着 0~10 的值, 这里夹回 0~3, 免得滑条一拖就跳到头。
+        function()
+            local v = tonumber(Addon.db.profile.QueueGap)
+            if not v then return 2 end
+            if v < 0 then return 0 end
+            if v > 3 then return 3 end
+            return v
+        end,
+        function(v) Addon.db.profile.QueueGap = v end,
+        L("Seconds of silence left between two consecutive voices.",
+          "两条连续语音之间留出的静音秒数。"),
+        SecFmt, L(" sec", " 秒"))
+    Cycle(page, L("Queue grows", "队列展开方向"),
+        { { value = "down", text = L("Down (header moves up)", "向下（标题栏上移）") },
+          { value = "up",   text = L("Up (header fixed)", "向上（标题栏固定）") } },
+        function() return IndexOf({ { value = "down" }, { value = "up" } },
+            Addon.db.profile.QueueGrow or "down") end,
+        function(v)
+            Addon.db.profile.QueueGrow = v
+            if QE.SoundQueueUI then
+                if QE.SoundQueueUI.ApplyLayout then pcall(QE.SoundQueueUI.ApplyLayout, QE.SoundQueueUI) end
+                if QE.SoundQueueUI.RebuildRows then pcall(QE.SoundQueueUI.RebuildRows, QE.SoundQueueUI) end
+            end
+        end,
+        L("Choose whether the queue rows stack above or below the header.",
+          "选择队列行在标题栏的上方还是下方展开。"))
+
+    Section(page, L("Other sounds", "其它声音"))
+    if LowerSounds:IsAvailable() then
+        Check(page, L("Lower other sounds while reading", "朗读时降低其它声音"),
+            function() return Addon.db.profile.LowerOthers end,
+            function(v)
+                Addon.db.profile.LowerOthers = v
+                LowerSounds:RefreshConfig()
+            end,
+            L("Turn the game's music, ambience, sound effects and dialog down while a line is spoken, and back up afterwards.",
+              "朗读时把游戏的音乐、环境、音效、对话压低, 念完再恢复。"))
+        Slider(page, L("Lower to", "降到"), 0, 100, 10,
+            function() return math.floor((tonumber(Addon.db.profile.LowerAmount) or 0.35) * 100) end,
+            function(v) Addon.db.profile.LowerAmount = v / 100 end,
+            L("How much of its normal volume each other channel keeps while a line is spoken.",
+              "朗读期间其它通道保留原来音量的百分之多少。"),
+            function(v) return tostring(v) .. "%" end)
+    else
+        Note(page, L("Not on this client: the voice plays through the music channel here, so the game's own sounds cannot be turned down separately.",
+                     "这个客户端不支持: 语音本身走的是音乐通道, 没法单独压低游戏其它声音。"), 34)
+    end
+
+    Section(page, L("Misc", "其它"))
+    Check(page, L("Minimap button", "小地图按钮"),
+        function() return Addon.db.profile.MinimapButton end,
+        function(v)
+            Addon.db.profile.MinimapButton = v
+            if QE.Minimap and QE.Minimap.ApplySettings then pcall(QE.Minimap.ApplySettings, QE.Minimap) end
+        end,
+        L("Show the button on the minimap. Left-click opens the settings, right-click pauses or resumes, drag to move it.",
+          "在小地图上显示按钮。左键打开设置, 右键暂停或继续, 可拖动改变位置。"))
+    Check(page, L("Test mode (log played/missing voices)", "测试模式（输出播放/缺失语音信息）"),
+        function() return Addon.db.profile.TestMode end,
+        function(v) Addon.db.profile.TestMode = v end,
+        L("Print the voice file being played, or the NPC/quest info when a voice is missing, to the chat frame.",
+          "把正在播放的语音文件名、或语音缺失时的 NPC/任务信息输出到聊天框。"))
+end
+
+local GOSSIP_FREQS = {
+    { value = "always",          text = L("Every time", "每次都播放") },
+    { value = "oncePerQuestNPC", text = L("Once per NPC that offers quests", "每个给任务的 NPC 一次") },
+    { value = "oncePerNPC",      text = L("Once per NPC", "每个 NPC 一次") },
+    { value = "never",           text = L("Never", "从不") },
+}
+
+local function BuildSpeech(page)
+    Section(page, L("Voice packs", "语音包"))
+    local zh, en = VoicePackState()
+    Note(page, L("Chinese pack", "中文语音包") .. ": "
+        .. (zh and L("installed", "已安装") or L("not installed", "未安装"))
+        .. "    " .. L("English pack", "英文语音包") .. ": "
+        .. (en and L("installed", "已安装") or L("not installed", "未安装")), 30)
+    Button(page, L("Download voice packs", "下载语音包"), 200, function()
+        ShowCopyPopup(L("Download voice packs", "下载语音包"), LINKS.download)
+    end, L("Opens a small window with the download page address selected; press Ctrl+C.",
+           "弹出小窗口并全选下载页地址, 按 Ctrl+C 复制。"))
+    Button(page, L("Test voice", "测试语音"), 200, function()
+        if QE.TestPlay then pcall(QE.TestPlay) end
+    end, L("Play a sample line so you can check the volume and the channel.",
+           "播放一段示例语音, 用来确认音量和通道。"))
+
+    Section(page, L("Reading", "朗读"))
+    Check(page, L("Read quest text automatically", "自动朗读任务文本"),
+        function()
+            local p = Addon.db.profile
+            return Addon.db.profile.AutoRead
+                or p.QuestDetail or p.QuestAccept or p.QuestComplete or p.QuestProgress
+        end,
+        function(v)
+            Addon.db.profile.AutoRead = v
+            Addon.db.profile.QuestDetail = v
+            Addon.db.profile.QuestAccept = v
+            Addon.db.profile.QuestComplete = v
+            Addon.db.profile.QuestProgress = v
+        end,
+        L("Read the quest text when a quest is offered, described, turned in or still in progress.",
+          "接任务、看任务详情、交任务、任务进行中时朗读任务文本。"))
+    Check(page, L("Play NPC gossip voice", "播放 NPC 闲聊语音"),
+        function() return Addon.db.profile.Gossip end,
+        function(v) Addon.db.profile.Gossip = v end,
+        L("Read the conversation text when you talk to an NPC. The game's own NPC voice is muted while the window is open.",
+          "与 NPC 对话时朗读其闲聊文本, 窗口打开期间会静音游戏自带的 NPC 语音。"))
+    Cycle(page, L("Repeat gossip", "重复闲聊"), GOSSIP_FREQS,
+        function() return IndexOf(GOSSIP_FREQS, Addon.db.profile.GossipFreq or "always") end,
+        function(v) Addon.db.profile.GossipFreq = v end,
+        L("Control how often the same NPC's chatter is read again.",
+          "控制同一个 NPC 的闲聊重复播放的频率。"))
+    Check(page, L("Stop when the dialog closes", "关闭窗口时停止播放"),
+        function() return Addon.db.profile.StopOnClose end,
+        function(v) Addon.db.profile.StopOnClose = v end,
+        L("Stop the line that is playing as soon as you close the quest or gossip window.",
+          "关闭任务或闲聊窗口时, 立即停止正在播放的语音。"))
+
+    Section(page, L("Zone intro", "区域介绍"))
+    Note(page, L("Reads a short introduction when you enter a zone. Book reading is separate and always on.",
+                 "进入地区时播报一段介绍。书籍朗读是独立功能, 不受这里影响。"), 34)
+    Check(page, L("Enable zone intro", "启用区域介绍"),
+        function() return Addon.db.profile.ZoneIntro end,
+        function(v) Addon.db.profile.ZoneIntro = v end,
+        L("Read a short introduction when you enter a zone.", "进入地区时播报一段介绍。"))
+    Check(page, L("Read each zone once", "每个地区只播报一次"),
+        function() return Addon.db.profile.ZoneOnce end,
+        function(v) Addon.db.profile.ZoneOnce = v end,
+        L("A zone you have already heard is not read again on this character.",
+          "已经听过的地区在当前角色上不再重复播报。"))
+    Check(page, L("Include subzones", "包括次级地区"),
+        function() return Addon.db.profile.ZoneSubzones end,
+        function(v) Addon.db.profile.ZoneSubzones = v end,
+        L("Also read the smaller named areas inside a zone.", "也播报地区内的小分区。"))
+    Button(page, L("Browse all places", "浏览全部地区语音"), 220, function()
+        if QuestEcho.ZoneBrowser and QuestEcho.ZoneBrowser.Toggle then
+            QuestEcho.ZoneBrowser:Toggle()
+        end
+    end,
+        L("Open Azeroth Zone Introductions: every zone and subzone in a list; click a line to hear it.",
+          "打开艾泽拉斯地区介绍: 全部地区和次级地区列在一起, 点一条听一条。"))
+    Button(page, L("Forget heard places", "忘记已朗读的地方"), 220, function()
+        if QuestEcho.ZoneIntro and QuestEcho.ZoneIntro.Forget then
+            QuestEcho.ZoneIntro.Forget()
+        end
+    end,
+        L("Clear this character's record of heard places, so every zone can be read again.",
+          "清空本角色听过的地点记录, 之后可以重新听一遍。"))
+end
+
+-- =============================================================================
+-- 窗口本体
+-- =============================================================================
+local TABS = {
+    { key = "home",    label = L("QuestEcho", "QuestEcho"), build = BuildHome },
+    { key = "general", label = L("General", "主要设置"),     build = BuildGeneral },
+    { key = "speech",  label = L("Reading", "朗读设置"),     build = BuildSpeech },
+}
+
+function OptionsUI:RefreshAll()
+    for i = 1, table.getn(refreshers) do
+        pcall(refreshers[i])
+    end
+end
+
+-- 说明文字那几行的高度是"按实际折行结果"撑出来的，而窗口还没显示出来的时候，
+-- 个别客户端不给隐藏中的字体算排版，量到的行高偏小。等窗口真显示出来再量一遍，
+-- 装不下就撑高（只往高里调，量稳了就不动，窗口不会来回跳）。
+local function RetouchNotes(page)
+    local grew = false
+    for i = 1, table.getn(page.entries) do
+        local e = page.entries[i]
+        local fs = e.fs
+        if fs and fs.GetHeight then
+            local h = fs:GetHeight() or 0
+            if h > 0 and h + 4 > (e.frame:GetHeight() or 0) then
+                e.frame:SetHeight(h + 4)
+                grew = true
+            end
+        end
+    end
+    return grew
+end
+
+-- 按"真实渲染出来的行高"重算窗口高度。Setup 里那次估算发生在窗口还没显示的时候，
+-- 个别客户端不给隐藏中的字体算排版，量出来的行高偏小，最后一行（"主要设置"页的
+-- 测试模式）就会贴到窗口底边、甚至被切掉半个字。这里只往高里调、不往矮里缩，
+-- 量稳了之后就不再动，窗口不会来回跳。
+function OptionsUI:Remeasure()
+    if not self.frame or not self.pages then return end
+    local h = PAGE_H
+    for i = 1, table.getn(TABS) do
+        local page = self.pages[TABS[i].key]
+        if page then
+            RetouchNotes(page)
+            Relayout(page)
+            local need = page.need or 0
+            if need > h then h = need end
+        end
+    end
+    if h > (self.pageH or 0) then
+        self.pageH = h
+        local frame = self.frame
+        frame:SetSize(PAGE_W + 16, h + 96)
+        for i = 1, table.getn(TABS) do
+            local page = self.pages[TABS[i].key]
+            if page then page:SetHeight(h) end
+        end
+    end
+end
+
+local function ApplyFilter(page, text)
+    text = string.lower(text or "")
+    local anySection = false
+    local lastSection = nil
+    local counts = {}
+    -- 先统计每个分组还剩几行
+    local sectionIndex, index = 0, 0
+    for i = 1, table.getn(page.entries) do
+        local e = page.entries[i]
+        if e.kind == "section" then
+            sectionIndex = i
+            counts[i] = 0
+        elseif e.kind == "row" then
+            local match = (text == "")
+                or (string.find(string.lower(e.text or ""), text, 1, true) ~= nil)
+            e.hidden = not match
+            if match and counts[sectionIndex] then
+                counts[sectionIndex] = counts[sectionIndex] + 1
+            end
+        end
+    end
+    -- 分组里一行都不剩就把分组也藏掉
+    for i = 1, table.getn(page.entries) do
+        local e = page.entries[i]
+        if e.kind == "section" then
+            e.hidden = (text ~= "") and (counts[i] == 0)
+        elseif e.kind == "note" then
+            -- 说明文字跟着它所在的分组走, 但它也算内容: 搜到就留着
+            local match = (text == "")
+                or (string.find(string.lower(e.text or ""), text, 1, true) ~= nil)
+            e.hidden = (text ~= "") and (not match)
+        end
+    end
+    Relayout(page)
+end
+
+function OptionsUI:Setup()
+    if self.frame then return end
+    local hasSettings = (type(Settings) == "table"
+        and type(Settings.RegisterCanvasLayoutCategory) == "function"
+        and type(Settings.RegisterAddOnCategory) == "function")
+
+    local frame = CreatePanelFrame and CreatePanelFrame("QuestEchoOptionsFrame", UIParent)
+        or CreateFrame("Frame", "QuestEchoOptionsFrame", UIParent)
+    self.frame = frame
+    frame:SetSize(PAGE_W + 16, PAGE_H + 96)
+    frame:SetFrameStrata("DIALOG")
+    if frame._qeHasBackdrop then
+        frame:SetBackdrop({
+            bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 16,
+            insets = { left = 4, right = 4, top = 4, bottom = 4 },
+        })
+        frame:SetBackdropColor(0.05, 0.05, 0.08, 0.97)
+        frame:SetBackdropBorderColor(0.25, 0.22, 0.20, 0.80)
+    end
+    frame:EnableMouse(true)
+
+    local title = FontString(frame, "GameFontNormalLarge", 1, 0.82, 0)
+    title:SetPoint("TOP", frame, "TOP", 0, -10)
+    title:SetText("QuestEcho")
+
+    -- 没有 Settings API 时它就是个普通窗口: 可拖动、有关闭按钮、能按 Esc 关
+    self.isWindow = not hasSettings
+    if self.isWindow then
+        frame:SetMovable(true)
+        frame:RegisterForDrag("LeftButton")
+        frame:SetScript("OnDragStart", function(f) f:StartMoving() end)
+        frame:SetScript("OnDragStop", function(f)
+            f:StopMovingOrSizing()
+            local x, y = f:GetCenter()
+            local ux, uy = UIParent:GetCenter()
+            Addon.db.char.OptPos = { x = x - ux, y = y - uy }
+            QuestEchoDB = Addon.db
+        end)
+        frame:SetClampedToScreen(true)
+        local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
+        close:SetSize(26, 26)
+        if AddClickFallback then
+            AddClickFallback(close, function() OptionsUI:Hide() end)
+        end
+        table.insert(UISpecialFrames, "QuestEchoOptionsFrame")
+    end
+
+    -- 分页按钮
+    self.tabButtons = {}
+    for i = 1, table.getn(TABS) do
+        local tab = TABS[i]
+        local btn = MakeButton(frame, 120, 22, tab.label, function()
+            OptionsUI:ShowTab(tab.key)
+        end)
+        btn:SetPoint("TOPLEFT", frame, "TOPLEFT", 12 + (i - 1) * 124, -38)
+        self.tabButtons[tab.key] = btn
+    end
+
+    -- 搜索框(过滤当前页的行)
+    local search = CreateFrame("EditBox", "QuestEchoOptionsSearch", frame)
+    search:SetSize(200, 22)
+    search:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -16, -38)
+    pcall(search.SetFontObject, search, GameFontHighlightSmall)
+    pcall(search.SetAutoFocus, search, false)
+    local sbg = search:CreateTexture(nil, "BACKGROUND")
+    sbg:SetAllPoints()
+    if QE.Tint then QE.Tint(sbg, 0.12, 0.12, 0.15, 1) end
+    search:SetTextInsets(6, 6, 0, 0)
+    search:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    search:SetScript("OnTextChanged", function(self)
+        local page = OptionsUI.pages and OptionsUI.pages[OptionsUI.current]
+        if page then ApplyFilter(page, self:GetText()) end
+    end)
+    local placeholder = FontString(frame, "GameFontHighlightSmall", 0.6, 0.6, 0.6)
+    placeholder:SetPoint("RIGHT", search, "LEFT", -6, 0)
+    placeholder:SetText(L("Search", "搜索"))
+    self.search = search
+
+    -- 三个分页
+    self.pages = {}
+    for i = 1, table.getn(TABS) do
+        local tab = TABS[i]
+        local page = NewPage(frame)
+        page:Hide()
+        self.pages[tab.key] = page
+        P(tab.key, function() tab.build(page) end)
+        Relayout(page)
+    end
+
+    -- 窗口高度按内容现算：三页里最高的那页决定窗口要多高。字体被替换过的客户端
+    -- 行高会比预期大一点，高度写死时最后几项就掉到窗口外面去了（"主要设置"页的
+    -- 测试模式那一项就是这么消失的）。PAGE_H 只当最小高度用。
+    local pageH = PAGE_H
+    for i = 1, table.getn(TABS) do
+        local page = self.pages[TABS[i].key]
+        local need = (page and page.need) or 0
+        if need > pageH then pageH = need end
+    end
+    self.pageH = pageH
+    frame:SetSize(PAGE_W + 16, pageH + 96)
+    for i = 1, table.getn(TABS) do
+        local page = self.pages[TABS[i].key]
+        if page then page:SetHeight(pageH) end
+    end
+    -- 刷新器: 恢复默认 / 别处改了设置以后把控件拉回真实值
+    for i = 1, table.getn(TABS) do
+        local page = self.pages[TABS[i].key]
+        for j = 1, table.getn(page.entries) do
+            local e = page.entries[j]
+            if e.refresh then table.insert(refreshers, e.refresh) end
+        end
+    end
+
+    if hasSettings then
+        local ok, category = pcall(Settings.RegisterCanvasLayoutCategory, frame, "QuestEcho")
+        if ok and category then
+            self.category = category
+            pcall(Settings.RegisterAddOnCategory, category)
+        end
+    else
+        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        local pos = Addon.db.char.OptPos
+        if pos and pos.x then
+            frame:ClearAllPoints()
+            frame:SetPoint("CENTER", UIParent, "CENTER", pos.x, pos.y)
+        end
+    end
+    -- 两种模式都要先藏起来: 注册进客户端选项列表时由设置面板自己显示, 当窗口用时
+    -- 由 Open() 显示。
+    -- 窗口第一次显示出来后再量一遍行高（见 Remeasure 的注释）。刚 Show 的这一帧
+    -- 字体可能还没排完版，所以下一帧再补一次；只往高里调，重复量没有副作用。
+    if QE.SafeHookScript then
+        QE.SafeHookScript(frame, "OnShow", function()
+            OptionsUI:Remeasure()
+            if QE.After then
+                QE.After(0, function()
+                    if OptionsUI.frame and OptionsUI.frame:IsShown() then
+                        OptionsUI:Remeasure()
+                    end
+                end)
+            end
+        end)
+    end
+    frame:Hide()
+    self:ShowTab("home")
+end
+
+function OptionsUI:ShowTab(key)
+    if not self.frame then self:Setup() end
+    if not self.pages then return end
+    self.current = key
+    for i = 1, table.getn(TABS) do
+        local k = TABS[i].key
+        local page = self.pages[k]
+        if page then
+            if k == key then page:Show() else page:Hide() end
+        end
+        local btn = self.tabButtons and self.tabButtons[k]
+        if btn then
+            -- SetEnabled 是 4.0 才有的, 老客户端只有 Enable/Disable。
+            if k == key then
+                pcall(function() btn:Disable() end)
+            else
+                pcall(function() btn:Enable() end)
+            end
+        end
+    end
+    if self.search then self.search:SetText("") end
+    local page = self.pages[key]
+    if page then ApplyFilter(page, "") end
+    -- 刚切过来的这页还没排过版，等下一帧再量一次（这时窗口已经显示，量得准）。
+    if QE.After and self.frame and self.frame:IsShown() then
+        QE.After(0, function()
+            if OptionsUI.frame and OptionsUI.frame:IsShown() then
+                OptionsUI:Remeasure()
+            end
+        end)
+    end
+end
+
+-- 打开设置: 有插件选项列表就跳到那里, 没有就当窗口开关。
+function OptionsUI:Open()
+    if not self.frame then self:Setup() end
+    if self.category and type(Settings) == "table" and Settings.OpenToCategory then
+        local id = self.category.GetID and self.category:GetID() or nil
+        local ok = false
+        if id then ok = pcall(Settings.OpenToCategory, id) and true or false end
+        if not ok then ok = pcall(Settings.OpenToCategory, self.category) and true or false end
+        if ok then return true end
+    end
+    if self.frame then
+        if self.frame:IsShown() then
+            self:Hide()
+            return false
+        end
+        self.frame:Show()
+        self:RefreshAll()
+        return true
+    end
+    return false
+end
+
+function OptionsUI:Toggle()
+    return self:Open()
+end
+
+function OptionsUI:Hide()
+    if self.frame and self.isWindow then self.frame:Hide() end
+end
+
+-- 客户端右上角那个插件收纳格(Addon Compartment)的回调。toc 里
+-- `## AddonCompartment: QuestEcho_OnCompartmentClick` 指向这里。
+function QuestEcho_OnCompartmentClick(_, mouseButton)
+    if mouseButton == "RightButton" and QE.SoundQueue then
+        QE.SoundQueue:TogglePauseQueue()
+        return
+    end
+    OptionsUI:Open()
+end
+
+QE.OptionsUI = OptionsUI

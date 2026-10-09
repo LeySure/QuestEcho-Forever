@@ -49,6 +49,7 @@ local L = function(en, zh)
     end
     return en
 end
+QuestEcho.L = L
 
 local format = string.format
 local tinsert = table.insert
@@ -72,6 +73,8 @@ Enums.SoundEvent = Enums.SoundEvent or {
     Gossip        = "gossip",
     Item          = "item",
     GameObject    = "gameobject",
+    Book          = "book",
+    Zone          = "zone",
 }
 
 Enums.GUID = Enums.GUID or {}
@@ -138,19 +141,40 @@ function Addon:GetDefaults()
             Gossip = true,           -- play NPC gossip-window voice
             GossipFreq = "always",   -- how often the same NPC's gossip is read: always | oncePerQuestNPC | oncePerNPC | never
             StopOnClose = false,     -- stop the current line when the quest or gossip window closes
+            AutoRead = true,         -- master switch: read quest text automatically
+            -- 朗读时把游戏的其它声音压低。Enabled 之外只有一个总幅度,
+            -- 语音自己所在的通道永不动。
+            LowerOthers = false,
+            LowerAmount = 0.35,      -- 其它声音降到原来的百分比
+            -- 区域介绍（进入地区时朗读介绍语音）。
+            ZoneIntro = true,        -- 总开关（不想听的人到设置里关）
+            ZoneOnce = true,         -- 每个地区只播报一次（按角色记忆，见"忘记已朗读的地方"）
+            ZoneSubzones = true,     -- 包括次级地区
+            ZoneLore = true,         -- 旧设置项，现由"忘记已朗读的地方"按钮取代
             MinimapButton = true,    -- show the minimap button
             MinimapAngle = 225,      -- saved minimap-button position around the rim (degrees)
             TestMode = false,        -- print the playing file name / missing NPC or quest info to the chat frame
             QueueGrow = "down",      -- "down": rows below header, header rises; "up": header fixed, rows above
             QueueGap = 2,           -- seconds of silence between consecutive voices
+            HideAfterDone = false,  -- 最后一条念完后自动收起状态栏(下一条入队时自己再出来)
+
+            -- 采集器相关。HarvestFlavor 是玩家用 /qe flavor 手工指定的端标记；
+            -- DetectedFlavor 是插件按 interface 号自动识别到的客户端，登录时写入。
+            -- 玩家直接上传 QuestEcho.lua 时，网站靠 DetectedFlavor 分档 —— 无限服的
+            -- 旧世界任务沿用 60 年代的任务 ID，只看 ID 会被误判成香草 60 年代。
+            HarvestFlavor = "",
+            DetectedFlavor = "",
         },
         char = {
             IsPaused = false,
             Pos = nil,
             OptPos = nil,
             SeenGossip = {},         -- NPC keys whose gossip has already played this character
+            ZoneHeard = {},          -- zone/subzone keys whose intro has played this character
         },
         missing = { items = {} },    -- scan log of voice lines that had no audio
+        -- 账号级:true 表示欢迎窗口已经出现过, 换角色也不再弹。
+        global = { Welcomed = false, LoweredVolumes = nil },
     }
 end
 
@@ -179,6 +203,15 @@ local function InitDB()
     -- settings persist.
     QuestEchoDB = QuestEchoDB or {}
     Addon.db = Addon:MergeDB(QuestEchoDB, Addon:GetDefaults())
+    -- 区域介绍早先的默认是关，老存档里存下了 false，看起来就像"功能默认没开"。
+    -- 这里一次性对齐成默认开（总开关 + 每个地区只播报一次）；玩家之后自己改回去
+    -- 就不再动它（ZoneDefaultsFixed 只写一次）。
+    local p = Addon.db.profile
+    if p and not p.ZoneDefaultsFixed then
+        p.ZoneIntro = true
+        p.ZoneOnce = true
+        p.ZoneDefaultsFixed = true
+    end
 end
 InitDB()
 
@@ -187,6 +220,7 @@ QuestEcho.session = { PlayedSession = {} }
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc[QuestEcho]|r " .. tostring(msg))
 end
+QuestEcho.Print = Print
 
 -- HookScript does not exist on this client, and an unguarded frame:HookScript()
 -- inside a pcall silently aborts whatever was being built. This helper never
@@ -277,6 +311,8 @@ end
 -- add more later.
 -- =============================================================================
 local CAP = {}
+-- 设置面板(OptionsUI.lua)要按能力显隐控件, 所以能力表必须能被别的文件读到。
+QuestEcho.CAP = CAP
 
 -- The sound channels the client names this way. The stored setting is uppercase
 -- ("MASTER"), which the modern client does not recognise, leaving every line to
@@ -996,6 +1032,18 @@ function DataModules:IsActive(module)
     return lang == self:GetActiveLang()
 end
 
+-- The one pack the player is actually hearing right now (forced choice, else
+-- client locale, else the fallback above). Book and zone lookups live on it, so
+-- those readers ask for it by name instead of repeating the selection rule.
+function DataModules:GetActive()
+    for _, m in ipairs(self:GetModules()) do
+        if self:IsActive(m.module) then
+            return m.module
+        end
+    end
+    return nil
+end
+
 function DataModules:TryLoad(name)
     if QE_IsAddOnLoaded(name) then
         return true
@@ -1169,6 +1217,30 @@ local function getLastNWords(text, n)
     return result
 end
 
+-- The single quest id a nested lookup entry stands for, or nil when it holds no
+-- id or more than one (a shared title covering several quests). Walked with an
+-- explicit stack: Lua 5.0 has no recursion limit worth risking inside a pcall.
+local function uniformNestedID(node)
+    if type(node) ~= "table" then return nil end
+    local pending = { node }
+    local i, found = 1, nil
+    while pending[i] do
+        local t = pending[i]
+        i = i + 1
+        if i > 64 then return nil end
+        for _, v in pairs(t) do
+            local tv = type(v)
+            if tv == "number" then
+                if found and v ~= found then return nil end
+                found = v
+            elseif tv == "table" then
+                pending[table.getn(pending) + 1] = v
+            end
+        end
+    end
+    return found
+end
+
 -- Resolve an Emberveil/Vanilla quest id from a retail quest title by matching
 -- the data pack lookup: lookup[source][title] -> id, or
 -- lookup[source][title][npcName] -> id / {questText -> id}.
@@ -1207,9 +1279,25 @@ function DataModules:GetQuestID(source, title, npcName, text)
                         if type(npcLookup) == "number" then
                             return npcLookup
                         end
+                        -- One giver can carry several lines under one title (a
+                        -- chain step spoken in two phases). When they all name
+                        -- the same quest the panel text is not needed to pick it.
+                        local sameNPC = uniformNestedID(npcLookup)
+                        if sameNPC then return sameNPC end
                         for questText, ID in pairs(npcLookup) do
                             text_entries[questText] = text_entries[questText] or ID
                         end
+                    else
+                        -- No NPC name to disambiguate with: the log button and the
+                        -- 1.12 layer's title fallback never have one. A pack nests
+                        -- a title under NPC names whenever the same title was
+                        -- harvested from more than one giver; when every id below
+                        -- it is the same one the title alone decides the quest,
+                        -- and answering here is the difference between playing and
+                        -- reporting "no voice" (2026-10-09: 艾尔默的任务 / 1097,
+                        -- whose accept entry is {弗纳·奥斯古, 铁匠阿古斯}).
+                        local sameTitle = uniformNestedID(titleLookup)
+                        if sameTitle then return sameTitle end
                     end
                 end
             end
@@ -1362,6 +1450,10 @@ function DataModules:PrepareSound(soundData)
                         folder = "items"
                     elseif soundData.event == Enums.SoundEvent.GameObject then
                         folder = "gameobjects"
+                    elseif soundData.event == Enums.SoundEvent.Book then
+                        folder = "items"
+                    elseif soundData.event == Enums.SoundEvent.Zone then
+                        folder = "maps"
                     end
                     local addonFolder = self.registeredAddonNames and self.registeredAddonNames[m.name] or m.name
                     -- Voices ship in three optional folders so players only
@@ -1738,6 +1830,16 @@ function DataModules:HasSound(vanillaID, event)
                 local gendered = self:AddPlayerGenderToFilename(fileName)
                 if data[gendered] then return true end
             end
+            -- 分版本目录(sounds_TBCWLK / sounds_Forever)的时长表也要查。
+            -- PrepareSound 会查这两张表, HasSound 是它的前哨: 这里漏查的话
+            -- TBC/WLK 与无限服的语音会被判成"没有对应语音", 永远轮不到播放。
+            local gendered = self:AddPlayerGenderToFilename(fileName)
+            for _, tier in ipairs(EXPANSION_TIERS) do
+                local td = module[tier.tableField]
+                if td and (td[fileName] or td[gendered]) then
+                    return true
+                end
+            end
         end
     end
     return false
@@ -1816,8 +1918,10 @@ function SoundQueue:AddSoundToQueue(soundData)
     if not self.current then
         self:PlayNextSound()
     end
-    if SoundQueueUI and SoundQueueUI.RebuildRows then
-        SoundQueueUI:RebuildRows()
+    if SoundQueueUI and SoundQueueUI.Update then
+        -- 走 Update 而不是只 RebuildRows: 状态栏可能刚被"念完收起"藏掉,
+        -- 有新语音进来时要把它重新显示出来。
+        SoundQueueUI:Update()
     end
 end
 
@@ -1833,6 +1937,9 @@ function SoundQueue:PlayNextSound()
         if SoundQueueUI and SoundQueueUI.RebuildRows then
             SoundQueueUI:RebuildRows()
         end
+        -- 队列彻底空了 = 这一段念完了, 开了"念完收起"就把状态栏收掉。
+        -- 注意不写 ShowUI, 玩家的"显示状态栏"开关保持开, 下一条语音入队时自己出来。
+        self:MaybeAutoHide()
         return
     end
     self.current = next
@@ -1955,6 +2062,10 @@ function SoundQueue:OnUpdate()
         if SoundQueueUI and SoundQueueUI.RebuildRows then
             SoundQueueUI:RebuildRows()
         end
+        -- 自然播完的路径以前漏了这一步: 队列空了没人通知"念完收起", 于是
+        -- 状态栏一直留着, 只有玩家手动点清空(X)才会收起。补上, 和
+        -- Clear / StopOnClose 走同一个出口(内部会检查开关和剩余队列)。
+        self:MaybeAutoHide()
     end
 end
 
@@ -1975,7 +2086,10 @@ function SoundQueue:PauseQueue()
     if cur then
         Utils:StopSound(cur)
     end
-    if SoundQueueUI then SoundQueueUI:RebuildRows() end
+    if SoundQueueUI then
+        SoundQueueUI:RebuildRows()
+        SoundQueueUI:UpdatePauseButton()
+    end
 end
 
 function SoundQueue:ResumeQueue()
@@ -2004,7 +2118,10 @@ function SoundQueue:ResumeQueue()
     else
         self:PlayNextSound()
     end
-    if SoundQueueUI then SoundQueueUI:RebuildRows() end
+    if SoundQueueUI then
+        SoundQueueUI:RebuildRows()
+        SoundQueueUI:UpdatePauseButton()
+    end
 end
 
 function SoundQueue:TogglePauseQueue()
@@ -2042,6 +2159,8 @@ function SoundQueue:RemoveAllSoundsFromQueue()
         self.current = nil
     end
     if SoundQueueUI then SoundQueueUI:RebuildRows() end
+    -- 玩家自己按的"清空"也算这一段结束了
+    self:MaybeAutoHide()
 end
 
 -- Stop and remove the lines that belong to the window that just closed. kind
@@ -2074,6 +2193,50 @@ function SoundQueue:StopOnClose(kind)
         if SoundQueueUI and SoundQueueUI.RebuildRows then
             SoundQueueUI:RebuildRows()
         end
+        self:MaybeAutoHide()
+    end
+end
+
+-- Drop everything one source queued (a book rebuilding its queue on a page
+-- turn, a zone intro). Lines of other sources -- a quest line running
+-- alongside -- are left untouched, so this is the per-source StopAll. The
+-- current line is only stopped when it belongs to `tag`.
+function SoundQueue:StopSource(tag)
+    if not tag then return end
+    local stoppedCurrent = false
+    if self.current and self.current._source == tag then
+        Utils:StopSound(self.current)
+        self.current = nil
+        stoppedCurrent = true
+    end
+    if table.getn(self.sounds) > 0 then
+        local kept = {}
+        for _, s in ipairs(self.sounds) do
+            if s._source == tag then
+                Utils:StopSound(s)
+            else
+                tinsert(kept, s)
+            end
+        end
+        self.sounds = kept
+    end
+    if stoppedCurrent then
+        self:PlayNextSound()
+    else
+        if SoundQueueUI and SoundQueueUI.RebuildRows then
+            SoundQueueUI:RebuildRows()
+        end
+        self:MaybeAutoHide()
+    end
+end
+
+-- 队列彻底空了(自然播完 / 被清空 / 关窗口连带清掉)就叫一次, 交给 AutoHide 判断开没开
+-- "念完收起"。还在出声或有排队的一律不收。
+function SoundQueue:MaybeAutoHide()
+    if self.current then return end
+    if table.getn(self.sounds) > 0 then return end
+    if SoundQueueUI and SoundQueueUI.AutoHide then
+        SoundQueueUI:AutoHide()
     end
 end
 
@@ -2100,6 +2263,10 @@ local function ColorForEvent(event)
         return "|cff7fff7f"
     elseif event == "complete" then
         return "|cff66ccff"
+    elseif event == "zone" then
+        return "|cff8fd6ff"
+    elseif event == "book" then
+        return "|cffc9a0ff"
     end
     return "|cffffd24a"
 end
@@ -2158,12 +2325,30 @@ end
 
 -- Template button with the click fallback. Uses UIPanelButtonTemplate for the
 -- classic WoW look; the click helper guarantees it responds on 12.1.
+-- 客户端字体在个别字号下测量/渲染会失真：短标签可能被截成省略号，也可能折成两行。
+-- 这里按实测文本宽度兜底加宽并关掉按钮文字的自动折行。只在"内宽确实装不下"时才动
+-- 宽度，而且只对成排的大按钮生效：24px 那类小按钮（"X" / "<" / ">"）本身只有一两个
+-- 符号，不需要兜底，被撑宽反而会顶到旁边那个按钮上（"< >" 叠在一起就是这么来的）。
 local function MakeButton(parent, w, h, text, onClick)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     b:SetSize(w, h)
     b:EnableMouse(true)
     b:RegisterForClicks("LeftButtonUp")
     b:SetText(text or "")
+    local fs = b.GetFontString and b:GetFontString()
+    if fs then
+        if fs.SetWordWrap then fs:SetWordWrap(false) end
+        local tw = fs.GetStringWidth and fs:GetStringWidth() or 0
+        if tw and tw > 0 and (w or 0) >= 60 and tw > (w or 0) - 16 then
+            b:SetWidth(math.floor(tw) + 20)
+        end
+        -- 个别客户端（字体被替换过的 335）会把"没写死宽度"的按钮文字按自己算出来的
+        -- 超宽值截成"两三个字加省略号"。显式给一个不小于按钮宽、且留足余量的宽度：
+        -- 文字短时观感不变（居中），被误判超宽时也不会再截断。
+        if fs.SetWidth then
+            pcall(fs.SetWidth, fs, math.max(b:GetWidth() or w or 0, tw or 0) + 40)
+        end
+    end
     AddClickFallback(b, onClick)
     return b
 end
@@ -2220,6 +2405,8 @@ local function MakeCheck(parent, x, y, text, getter, setter, extra, tooltip)
     local label = c:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     label:SetPoint("LEFT", c, "RIGHT", 4, 0)
     label:SetJustifyH("LEFT")
+    -- 关掉折行：勾选项标题都是短句，宁可往右伸一点也不要折成两行。
+    if label.SetWordWrap then label:SetWordWrap(false) end
     label:SetText(text or "")
     c.qeLabel = label
     c.Text = label
@@ -2247,6 +2434,13 @@ local function MakeCheck(parent, x, y, text, getter, setter, extra, tooltip)
     return c
 end
 
+-- 设置面板已经搬到 OptionsUI.lua / Welcome.lua。这两个文件是单独加载的, 只能
+-- 通过 QuestEcho 上这些引用来复用 Core 里手搓的控件(本客户端没有
+-- InterfaceOptionsCheckButtonTemplate 等模板, 全部控件都是手工搭的)。
+QuestEcho.MakeButton = MakeButton
+QuestEcho.MakeCheck = MakeCheck
+QuestEcho.AddClickFallback = AddClickFallback
+
 function SoundQueueUI:Create()
     -- Set up the collections BEFORE anything that can fail. A partial failure (an
     -- unsupported method used to abort this whole function) used to leave them nil,
@@ -2260,10 +2454,10 @@ function SoundQueueUI:Create()
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
+    -- 直接拖动, 不再需要按住 Shift: 状态栏是常驻的, 每次想挪一下都要先找 Shift
+    -- 用键盘调位置很别扭, 所以框体本身直接拖。
     frame:SetScript("OnDragStart", function(f)
-        if IsShiftDown() then
-            f:StartMoving()
-        end
+        f:StartMoving()
     end)
     frame:SetScript("OnDragStop", function(f)
         f:StopMovingOrSizing()
@@ -2312,17 +2506,37 @@ function SoundQueueUI:Create()
     clear:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -4, 19)
     self.clearBtn = clear
 
-    local pause = MakeButton(frame, 24, 18, "II", function()
+    local pause = MakeButton(frame, 24, 18, "", function()
         SoundQueue:TogglePauseQueue()
     end)
     pause:SetPoint("BOTTOMRIGHT", clear, "BOTTOMLEFT", -2, 0)
+    -- 图标用插件自带的两张 TGA 切, 不在按钮上写字符: 客户端四套字体里都没有
+    -- "▶"(U+25B6), 写出来是方块(查过 cmap)。没暂停显示双竖条(点=暂停),
+    -- 暂停后换成三角(点=继续), 由 UpdatePauseButton 切换。
+    -- OVERLAY 层保证盖在按钮底图上面; 32x32 画布显示成 14x14。注意: 客户端
+    -- 只在启动时扫描贴图文件, 新加/替换 tga 后要完全重启游戏才认(/reload 无效),
+    -- 否则按钮上空白。
+    local pauseIcon = pause:CreateTexture(nil, "OVERLAY")
+    pauseIcon:SetSize(14, 14)
+    pauseIcon:SetPoint("CENTER", pause, "CENTER", 0, 0)
+    pauseIcon:SetTexture("Interface\\AddOns\\QuestEcho\\QuestEchoPause.tga")
+    local playIcon = pause:CreateTexture(nil, "OVERLAY")
+    playIcon:SetSize(14, 14)
+    playIcon:SetPoint("CENTER", pause, "CENTER", 1, 0)
+    playIcon:SetTexture("Interface\\AddOns\\QuestEcho\\QuestEchoPlay.tga")
+    playIcon:Hide()
+    pause.qePauseIcon = pauseIcon
+    pause.qePlayIcon = playIcon
+    AttachTooltip(pause, L("Pause / resume reading", "暂停 / 继续朗读"))
     self.pauseBtn = pause
 
-    -- settings button (OptionsUI is declared later in the file, so resolve it
-    -- through the global namespace at click time)
+    -- settings button (OptionsUI lives in OptionsUI.lua, so resolve it through
+    -- the global namespace at click time)
     local gear = MakeButton(frame, 48, 18, L("Settings", "设置"), function()
         local O = QuestEcho.OptionsUI
-        if O and O.Toggle then
+        if O and O.Open then
+            pcall(O.Open, O)
+        elseif O and O.Toggle then
             pcall(O.Toggle, O)
         else
             Print("[QuestEcho] settings unavailable")
@@ -2462,15 +2676,96 @@ function SoundQueueUI:ApplyLayout()
 end
 
 function SoundQueueUI:Update()
+    -- Create() 是 pcall 包裹的: 状态栏建不出来时(老客户端/贴图异常)它不会报错,
+    -- 但 frame 会一直是 nil。这里必须和 RebuildRows 一样先挡一下 —— 否则之后
+    -- 每来一条语音, AddSoundToQueue 末尾的 Update() 都会抛错, 把"整本书/整段
+    -- 排队"的循环直接打断, 结果只排进第一条。状态栏没有不该拖垮播放。
+    if not self.frame then return end
     local show = Addon.db.profile.ShowUI
     if show then
+        -- 渐隐可能正在进行中(刚念完一段, 新语音又入队): 先停掉并复亮再显示,
+        -- 否则新一条语音出来时状态栏是半透明甚至看不见的。
+        self:StopFade()
         self.frame:Show()
         -- ApplySavedPos deliberately NOT called here: it would override a position the
         -- player has just dragged to. It runs once at creation.
     else
+        -- 藏之前把 alpha 复位, 免得下次显示出来还是半透明的
+        self:StopFade()
         self.frame:Hide()
     end
     self:RebuildRows()
+    self:UpdatePauseButton()
+end
+
+-- 暂停按钮的图标跟着播放状态走: 正常 = 双竖条(按下去=暂停), 暂停中 = 三角
+-- (按下去=继续)。以前按钮一直写着 "II", 按下去界面没任何变化, 玩家不知道
+-- 到底停没停。
+function SoundQueueUI:UpdatePauseButton()
+    local b = self.pauseBtn
+    if not b then return end
+    local paused = Addon.db and Addon.db.char and Addon.db.char.IsPaused
+    if b.qePauseIcon then
+        if paused then b.qePauseIcon:Hide() else b.qePauseIcon:Show() end
+    end
+    if b.qePlayIcon then
+        if paused then b.qePlayIcon:Show() else b.qePlayIcon:Hide() end
+    end
+end
+
+-- 收起用渐隐而不是硬切: 在 FADE_SECONDS 里把整框 alpha 从当前值降到 0 再
+-- Hide()。用独立 ticker 驱动 —— 状态栏自己的 OnUpdate 只管进度条/字幕,
+-- 而且 Hide 之后就不跑了。渐隐被打断(下一条语音入队)时 StopFade 立刻复亮。
+local FADE_SECONDS = 0.35
+
+function SoundQueueUI:StopFade()
+    self._fading = false
+    if self._fadeTicker then
+        self._fadeTicker:SetScript("OnUpdate", nil)
+    end
+    if self.frame and type(self.frame.SetAlpha) == "function" then
+        self.frame:SetAlpha(1)
+    end
+end
+
+function SoundQueueUI:StartFade()
+    local f = self.frame
+    if not f or self._fading then return end
+    -- 已经藏着的框体不用渐隐
+    local shown = _G.QuestEcho and QuestEcho.IsFrameShown
+    if shown and not shown(f) then return end
+    if not self._fadeTicker then
+        self._fadeTicker = CreateFrame("Frame", nil, UIParent)
+    end
+    local from = 1
+    if type(f.GetAlpha) == "function" then
+        local ok, a = pcall(f.GetAlpha, f)
+        if ok and type(a) == "number" and a > 0 then from = a end
+    end
+    local t = 0
+    self._fading = true
+    self._fadeTicker:SetScript("OnUpdate", function(_, elapsed)
+        t = t + (elapsed or 0)
+        local a = from * (1 - t / FADE_SECONDS)
+        if a <= 0 then
+            self._fading = false
+            self._fadeTicker:SetScript("OnUpdate", nil)
+            -- 先复位再隐藏: 下一次 Show 出来是全亮的, 不留半透明的坑
+            if type(f.SetAlpha) == "function" then f:SetAlpha(1) end
+            f:Hide()
+        elseif type(f.SetAlpha) == "function" then
+            f:SetAlpha(a)
+        end
+    end)
+end
+
+-- 一段语音全部念完后收起状态栏(开关默认关)。只藏框体, 不动 ShowUI ——
+-- 玩家的"显示状态栏"意图没变, 下一条语音入队时 Update() 会自己把它显示回来。
+-- 收起动作走渐隐(StartFade), 不硬切。
+function SoundQueueUI:AutoHide()
+    if not Addon.db.profile.HideAfterDone then return end
+    if not Addon.db.profile.ShowUI then return end
+    self:StartFade()
 end
 
 function SoundQueueUI:UpdateProgress()
@@ -2601,16 +2896,42 @@ local function CaptionHeroWord(s)
     return CaptionHeroName()
 end
 
+-- $g pairs that are NOT a form of address. Replacing these with 勇士 would read
+-- as nonsense ("$g古龙水:香水;" -> 香水 is a bottle of perfume, not the player),
+-- so they keep the branch the voice was generated from.
+-- Mirrors G_NOT_HERO in outputs/wow_tokens.py - change both or audio and caption
+-- drift apart again.
+local CAP_G_KEEP = {
+    ["他|她"] = true, ["她|他"] = true, ["他的|她的"] = true,
+    ["国王|皇后"] = true, ["国王|女王"] = true,
+    ["爸爸|妈妈"] = true, ["父亲|母亲"] = true, ["儿子|女儿"] = true,
+    ["古龙水|香水"] = true, ["男|女"] = true, ["平民|平民"] = true,
+    ["魅魔|地狱火"] = true, ["男演员|女演员"] = true,
+    ["与你无关|不用你担心"] = true, ["种|胆"] = true,
+}
+
+-- What a "$g left:right;" token stands for. Address forms (兄弟/姐妹, 先生/女士,
+-- 小伙子/姑娘 ...) are spoken as 勇士 in the Chinese pack - the user does not want
+-- one audio file per gender - so the caption has to say 勇士 too. Everything else
+-- falls back to the right-hand branch, which is what was synthesised.
+-- 18 bytes = 6 CJK ideographs; longer than that and it is a whole sentence.
+local function CaptionGenderWord(a, b)
+    if CAP_G_KEEP[tostring(a) .. "|" .. tostring(b)] then return b end
+    -- Lua 5.0 (1.12 / Turtle 1.18) has no '#' length operator, so measure with
+    -- string.len instead. Both count bytes, so 18 still means 6 CJK ideographs.
+    if string.len(tostring(a)) > 18 or string.len(tostring(b)) > 18 then return b end
+    if CaptionHeroWord(a .. b) == "勇士" then return "勇士" end
+    return b
+end
+
 -- Resolve the "$" placeholders the client and the data pack keep inside quest and
 -- gossip text. Without this a caption prints "$c" where the voice says 勇士.
---   $g / $G / $T "left:right;" - the pack was generated from the branch after the
---     first separator, and the caption takes the same branch so it keeps reading
---     what the voice reads.
+--   $g / $G / $T "left:right;" - see CaptionGenderWord.
 --   $N/$n/$C/$c/$R/$r - the word above.
 --   ::tag:: - markup the pack strips before synthesis.
 local function CaptionResolveTokens(s)
     if type(s) ~= "string" or s == "" then return s end
-    s = string.gsub(s, "%$[GgTt]([^:;]*):([^:;]*);", "%2")
+    s = string.gsub(s, "%$[GgTt]([^:;]*):([^:;]*);", CaptionGenderWord)
     s = string.gsub(s, "%$[NnCcRr]", CaptionHeroWord(s))
     s = string.gsub(s, "::[%w_]*::", "")
     return s
@@ -3123,352 +3444,11 @@ end
 -- =============================================================================
 -- OptionsUI
 -- =============================================================================
+-- 设置面板已整体搬到 OptionsUI.lua(主设置 / 主要设置 / 朗读设置三页, 并注册进
+-- 客户端自带的插件选项列表), 欢迎窗口在 Welcome.lua。搬走是因为 Core.lua 主块
+-- 的 local 已逼近 200 的硬上限, 再加控件会静默不加载整个插件。
+-- 这里只留空壳, 让文件载入阶段就引用它的地方不至于报错。
 QuestEcho.OptionsUI = {}
-local OptionsUI = QuestEcho.OptionsUI
-
-function OptionsUI:ApplySavedPos()
-    local pos = Addon.db.char.OptPos
-    if not pos or not pos.x then
-        self.frame:ClearAllPoints()
-        self.frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-        return
-    end
-    self.frame:ClearAllPoints()
-    self.frame:SetPoint("CENTER", UIParent, "CENTER", pos.x, pos.y)
-end
-
--- Cycle button: the replacement for UIDropDownMenu on clients that lack the
--- dropdown template. Blizzard's own UIDropDownMenu.lua aborts on this client
--- ("attempt to index local `frame' (a number value)"), so the options panel
--- cannot use dropdowns at all. A value + "<" button cycles through the choices.
-local function MakeCycleButton(parent, width, x, y, values, getter, setter, tooltip)
-    local current = getter()
-
-    local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    label:SetPoint("TOPLEFT", parent, "TOPLEFT", x + 70, y)
-
-    local function render()
-        local text = values[current] and values[current].text or "?"
-        label:SetText("|cffffd200" .. text .. "|r")
-    end
-
-    local prev = MakeButton(parent, 20, 18, "<", function()
-        current = current - 1
-        if current < 1 then current = table.getn(values) end
-        setter(values[current].value)
-        render()
-    end)
-    prev:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
-
-    local nextBtn = MakeButton(parent, 20, 18, ">", function()
-        current = current + 1
-        if current > table.getn(values) then current = 1 end
-        setter(values[current].value)
-        render()
-    end)
-    nextBtn:SetPoint("TOPLEFT", parent, "TOPLEFT", x + 24, y)
-
-    render()
-    if tooltip and type(AttachTooltip) == "function" then
-        AttachTooltip(prev, tooltip)
-        AttachTooltip(nextBtn, tooltip)
-        AttachTooltip(label, tooltip)
-    end
-    return { prev = prev, next = nextBtn, label = label, render = render }
-end
-
-function OptionsUI:Create()
-    -- Localised guard so one broken control neither stops the panel nor hides
-    -- which control it was; failures are reported by name below.
-    local function P(name, fn)
-        local ok, err = pcall(fn)
-        if not ok then
-            Print("[QuestEcho] options control failed: " .. name
-                .. " -> " .. tostring(err))
-        end
-        return ok
-    end
-    OptionsUI._P = P
-    -- Native WoW window using BackdropTemplate + Tooltip frame textures.
-    local frame = CreatePanelFrame("QuestEchoOptionsFrame", UIParent)
-    self.frame = frame
-    frame:SetSize(300, 556)
-    frame:SetPoint("CENTER")
-    frame:SetFrameStrata("DIALOG")
-    if frame._qeHasBackdrop then
-        frame:SetBackdrop({
-            bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile     = true, tileSize = 16, edgeSize = 16,
-            insets   = { left = 4, right = 4, top = 4, bottom = 4 },
-        })
-        frame:SetBackdropColor(0.05, 0.05, 0.08, 0.97)
-        frame:SetBackdropBorderColor(0.25, 0.22, 0.20, 0.80)
-    end
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", function(f)
-        if IsShiftDown() then
-            f:StartMoving()
-        end
-    end)
-    frame:SetScript("OnDragStop", function(f)
-        f:StopMovingOrSizing()
-        local x, y = f:GetCenter()
-        local ux, uy = UIParent:GetCenter()
-        -- UI-space offset from the UIParent centre; same space as SetPoint.
-        Addon.db.char.OptPos = { x = x - ux, y = y - uy }
-        QuestEchoDB = Addon.db
-    end)
-    frame:SetClampedToScreen(true)
-    tinsert(UISpecialFrames, "QuestEchoOptionsFrame")
-
-    -- title
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOP", frame, "TOP", 0, -8)
-    title:SetText("QuestEcho " .. L("Settings", "设置"))
-    title:SetTextColor(1.0, 0.82, 0.0)
-
-    -- close (X)
-    local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
-    close:SetSize(26, 26)
-    close:EnableMouse(true)
-    AddClickFallback(close, function()
-        self:Hide()
-    end)
-    self.close = close
-
-    -- voice language selector: lets an English client hear Chinese and vice
-    -- versa, independent of the client language.
-    local langLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    langLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -32)
-    langLabel:SetText(L("Voice language", "语音语言"))
-    langLabel:SetTextColor(1, 0.82, 0)
-
-    local LANGS = {
-        { value = "auto", text = L("Auto (client language)", "自动（跟随客户端）") },
-        { value = "enUS", text = L("English", "英语") },
-        { value = "zhCN", text = L("Chinese", "中文") },
-    }
-    local langIndex = 1
-    for i = 1, table.getn(LANGS) do
-        if LANGS[i].value == (Addon.db.profile.VoiceLang or "auto") then
-            langIndex = i
-        end
-    end
-    self.langCycle = MakeCycleButton(frame, 184, 16, -52, LANGS,
-        function() return langIndex end,
-        function(value)
-            Addon.db.profile.VoiceLang = value
-            if RefreshQuestEchoButtons then pcall(RefreshQuestEchoButtons) end
-        end,
-        L("Choose which voice pack plays, regardless of the client language. Auto follows your client.",
-          "选择播放哪个语音包，与客户端语言无关。自动则跟随客户端。"))
-
-    -- The audio-channel selector is gone on purpose: 1.12's PlaySoundFile takes
-    -- (path, volume) and has no channel argument at all, so only the master
-    -- slider can affect these voiceovers. Offering the other channels would be
-    -- a setting that silently does nothing.
-    local hint = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    hint:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -100)
-    hint:SetWidth(270)
-    hint:SetJustifyH("LEFT")
-    hint:SetTextColor(0.7, 0.7, 0.7)
-    hint:SetText(L("Voice volume follows the game's Master volume slider.",
-                   "语音音量跟随游戏设置中的主音量滑条。"))
-    pcall(hint.SetFont, hint, FONT, 11)
-
-    -- captions checkbox
-    local capCheck = MakeCheck(frame, 16, -136, L("Show captions", "显示字幕"),
-        function() return Addon.db.profile.Captions end,
-        function(v) Addon.db.profile.Captions = v end, nil,
-        L("Show the spoken text on the status bar while a line plays.",
-          "播放语音时在状态栏上同步显示所说的文字。"))
-    self.capCheck = capCheck
-
-    -- detail voice checkbox
-    local detCheck = MakeCheck(frame, 16, -164, L("Play quest detail voice", "播放任务详情语音"),
-        function() return Addon.db.profile.QuestDetail end,
-        function(v) Addon.db.profile.QuestDetail = v end, nil,
-        L("Read the quest text when a quest's details are shown.",
-          "打开任务详情时朗读任务文本。"))
-    self.detCheck = detCheck
-
-    -- gossip voice checkbox, placed directly under quest detail
-    local gossipCheck = MakeCheck(frame, 16, -192, L("Play NPC gossip voice", "播放 NPC 闲聊语音"),
-        function() return Addon.db.profile.Gossip end,
-        function(v) Addon.db.profile.Gossip = v end, nil,
-        L("Read the conversation text when you talk to an NPC. The game's own NPC voice is muted while the window is open.",
-          "与 NPC 对话时朗读其闲聊文本，窗口打开期间会静音游戏自带的 NPC 语音。"))
-    self.gossipCheck = gossipCheck
-
-    -- how often the same NPC's gossip is read again
-    local freqLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    freqLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -222)
-    freqLabel:SetText(L("Repeat gossip", "重复闲聊"))
-    freqLabel:SetTextColor(1, 0.82, 0)
-
-    local GOSSIP_FREQS = {
-        { value = "always",          text = L("Every time", "每次都播放") },
-        { value = "oncePerQuestNPC", text = L("Once per NPC that offers quests", "每个给任务的 NPC 一次") },
-        { value = "oncePerNPC",      text = L("Once per NPC", "每个 NPC 一次") },
-        { value = "never",           text = L("Never", "从不") },
-    }
-    local freqIndex = 1
-    for i = 1, table.getn(GOSSIP_FREQS) do
-        if GOSSIP_FREQS[i].value == (Addon.db.profile.GossipFreq or "always") then
-            freqIndex = i
-        end
-    end
-    self.freqCycle = MakeCycleButton(frame, 184, 16, -242, GOSSIP_FREQS,
-        function() return freqIndex end,
-        function(value) Addon.db.profile.GossipFreq = value end,
-        L("Control how often the same NPC's chatter is read again. Quest NPCs can be read once while plain chatter keeps playing.",
-          "控制同一个 NPC 的闲聊重复播放的频率。给任务的 NPC 可只读一次，纯闲聊的则继续播放。"))
-
-    -- status bar toggle
-    local uiCheck = MakeCheck(frame, 16, -286, L("Show status bar", "显示状态栏"),
-        function() return Addon.db.profile.ShowUI end,
-        function(v) Addon.db.profile.ShowUI = v end,
-        function() SoundQueueUI:Update() end,
-        L("Show the movable status bar and playback queue on screen.",
-          "在屏幕上显示可移动的状态栏与播放队列。"))
-    self.uiCheck = uiCheck
-
-    -- stop the current line when the quest or gossip window closes
-    local stopCheck = MakeCheck(frame, 16, -314, L("Stop when the dialog closes", "关闭窗口时停止播放"),
-        function() return Addon.db.profile.StopOnClose end,
-        function(v) Addon.db.profile.StopOnClose = v end, nil,
-        L("Stop the line that is playing as soon as you close the quest or gossip window.",
-          "关闭任务或闲聊窗口时，立即停止正在播放的语音。"))
-    self.stopCheck = stopCheck
-
-    -- minimap button toggle
-    local mmCheck = MakeCheck(frame, 16, -342, L("Minimap button", "小地图按钮"),
-        function() return Addon.db.profile.MinimapButton end,
-        function(v) Addon.db.profile.MinimapButton = v end,
-        function() if QuestEcho.Minimap then QuestEcho.Minimap:ApplySettings() end end,
-        L("Show the button on the minimap. Left-click for settings, right-click to pause or resume, drag to move it.",
-          "在小地图上显示按钮。左键打开设置，右键暂停或继续，可拖动改变位置。"))
-    self.mmCheck = mmCheck
-
-    -- test voice button (TestPlay is declared later in the file; resolve at
-    -- click time through the global namespace)
-    local testBtn = MakeButton(frame, 140, 22, L("Test voice", "测试语音"), function()
-        local tp = QuestEcho.TestPlay
-        if tp then
-            pcall(tp)
-        else
-            Print("[QuestEcho] test unavailable")
-        end
-    end)
-    testBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -372)
-    self.testBtn = testBtn
-
-    -- queue grow direction
-    local growLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    growLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -406)
-    growLabel:SetText(L("Queue grows", "队列展开方向"))
-    growLabel:SetTextColor(1, 0.82, 0)
-
-    local GROWS = {
-        { value = "down", text = L("Down (header moves up)", "向下（标题栏上移）") },
-        { value = "up",   text = L("Up (header fixed)", "向上（标题栏固定）") },
-    }
-    local growIndex = 1
-    for i = 1, table.getn(GROWS) do
-        if GROWS[i].value == (Addon.db.profile.QueueGrow or "down") then
-            growIndex = i
-        end
-    end
-    self.growCycle = MakeCycleButton(frame, 184, 16, -426, GROWS,
-        function() return growIndex end,
-        function(value)
-            Addon.db.profile.QueueGrow = value
-            if SoundQueueUI then
-                SoundQueueUI:ApplyLayout()
-                SoundQueueUI:RebuildRows()
-            end
-        end,
-        L("Choose whether the queue rows stack above or below the header.",
-          "选择队列行在标题栏的上方还是下方展开。"))
-
-    -- silence between consecutive voices
-    local gapSlider = CreateFrame("Slider", "QuestEchoGapSlider", frame, "OptionsSliderTemplate")
-    gapSlider:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -470)
-    gapSlider:SetWidth(264)
-    gapSlider:SetMinMaxValues(0, 10)
-    gapSlider:SetValueStep(1)
-    pcall(gapSlider.SetObeyStepOnDrag, gapSlider, true)
-    gapSlider:SetValue(tonumber(Addon.db.profile.QueueGap) or 2)
-    -- This client's slider template does not provide the <name>Text/Low/High
-    -- font strings, so create whichever ones are missing.
-    local function sliderText(suffix)
-        local name = gapSlider:GetName() .. suffix
-        local existing = _G[name]
-        if existing then return existing end
-        local created = gapSlider:CreateFontString(name, "ARTWORK", "GameFontHighlightSmall")
-        if suffix == "Text" then
-            created:SetPoint("BOTTOM", gapSlider, "TOP", 0, 4)
-            created:SetTextColor(1, 0.82, 0)
-        elseif suffix == "Low" then
-            created:SetPoint("TOPLEFT", gapSlider, "BOTTOMLEFT", -4, 2)
-        else
-            created:SetPoint("TOPRIGHT", gapSlider, "BOTTOMRIGHT", 4, 2)
-        end
-        return created
-    end
-    sliderText("Text"):SetText(L("Gap between voices (sec)", "语音间隔（秒）"))
-    sliderText("Low"):SetText("0")
-    sliderText("High"):SetText("10")
-    gapSlider:SetScript("OnValueChanged", function(_, value)
-        Addon.db.profile.QueueGap = value
-    end)
-    self.gapSlider = gapSlider
-    AttachTooltip(gapSlider,
-        L("Seconds of silence left between two consecutive voices.",
-          "两条连续语音之间留出的静音秒数。"))
-
-    -- test mode: log the played file name, or missing NPC/quest info, to chat
-    local testModeCheck = MakeCheck(frame, 16, -516, L("Test mode (log played/missing voices)", "测试模式（输出播放/缺失语音信息）"),
-        function() return Addon.db.profile.TestMode end,
-        function(v) Addon.db.profile.TestMode = v end, nil,
-        L("Print the voice file being played, or the NPC/quest info when a voice is missing, to the chat frame.",
-          "把正在播放的语音文件名、或语音缺失时的 NPC/任务信息输出到聊天框。"))
-    self.testModeCheck = testModeCheck
-
-    self:ApplySavedPos()
-    frame:Hide()
-end
-
-function OptionsUI:Toggle()
-    if not self.frame then
-        local ok, err = pcall(function() self:Create() end)
-        if not ok then
-            -- Report the failing line, then keep going: Create() has already
-            -- assigned self.frame, so the panel can still be shown with whatever
-            -- controls were built before the failure.
-            Print("[QuestEcho] options create error: " .. tostring(err))
-        end
-        if not self.frame then
-            return false
-        end
-    end
-    if self.frame:IsShown() then
-        self:Hide()
-        return false
-    end
-    self.frame:Show()
-    self:ApplySavedPos()
-    return true
-end
-
-function OptionsUI:Hide()
-    if self.frame then self.frame:Hide() end
-end
-
 -- =============================================================================
 -- Quest triggering (retail events)
 -- =============================================================================
@@ -4442,6 +4422,8 @@ local function InstallQuestEchoButtons()
             if QuestMapFrame.DetailsFrame then
                 pcall(InstallQuestEchoButtons)
             end
+            -- 打开任务栏时把行内播放按钮也重画一遍(无限服等现代日志)。
+            pcall(QuestEcho.UpdateModernRowButtons)
         end)
     end
 end
@@ -4508,27 +4490,13 @@ local function ResolveSelectedQuestID()
     return qid, title
 end
 
--- Forward declarations: the per-row helpers are defined after
--- ClassicRefreshButtons but captured by it as upvalues.
+-- Forward declarations: the per-row helpers are defined further down the file
+-- but referenced from functions above them.
 local UpdateRowButtons
 local PlayRowButton
 
-local function ClassicRefreshButtons()
-    -- The per-row buttons are what the player actually uses now, so they are
-    -- refreshed on every log update; the single buttons stay as a fallback.
-    pcall(UpdateRowButtons)
-    local qid, title = ResolveSelectedQuestID()
-    local hasVoice = false
-    if qid then
-        pcall(function()
-            if DataModules:HasSound(qid, Enums.SoundEvent.QuestAccept) then
-                hasVoice = true
-            end
-        end)
-    end
-    -- The standalone button that used to sit above the quest list is gone: the
-    -- per-row buttons are the interface, so there is nothing else to refresh.
-end
+-- (原先这里还有一个 ClassicRefreshButtons, 只调用 UpdateRowButtons 且已无人引用,
+--  随 2026-10-09 "老客户端撤掉行内按钮"的调整一并删除。)
 
 local function ClassicPlaySelected()
     -- The client gives no quest id on 1.12, so the title lookup supplies it.
@@ -4547,7 +4515,8 @@ local function ClassicPlaySelected()
 end
 
 local function MakeClassicEchoButton(parent)
-    local b = MakeButton(parent, 52, 20, "Echo", ClassicPlaySelected)
+    -- 任务列表每行右侧的按钮。中文客户端写"播放", 英文客户端沿用 Echo。
+    local b = MakeButton(parent, 52, 20, L("Play", "播放"), ClassicPlaySelected)
     pcall(b.SetFrameStrata, b, "TOOLTIP")
     pcall(b.SetFrameLevel, b, parent:GetFrameLevel() + 30)
     b:EnableMouse(true)
@@ -4555,7 +4524,13 @@ local function MakeClassicEchoButton(parent)
 end
 
 -- ============================================================================
--- Per-row Echo buttons.
+-- Per-row Echo buttons (classic quest log).
+--
+-- 停用说明(2026-10-09): 老客户端不再装这套行按钮 —— 行内播放按钮只保留给
+-- "无限服"这类现代任务日志客户端(见 QuestEcho.UpdateModernRowButtons)。
+-- 代码全部保留: 将来若要恢复, 把 InstallClassicQuestButtons 里的 HideAllRowButtons
+-- 换回 UpdateRowButtons 即可。
+--
 -- A single button keyed off GetQuestLogSelection was ambiguous: switching rows
 -- changed the caption but not what played. The working 1.12 addons put a play
 -- button on every visible quest row instead, so that is done here: the child
@@ -5014,13 +4989,148 @@ PlayRowButton = function(button)
 end
 
 
+-- =============================================================================
+-- 现代(地图式)任务日志的行内播放按钮 —— 只给"无限服"这类客户端。
+--
+-- 老客户端(1.12/1.18、2.4.3、3.3.5)的行内按钮已按玩家 2026-10-09 的决定撤掉,
+-- 只保留详情面板原来的 Echo 按钮(见 InstallClassicQuestButtons)。这里这套与
+-- 每个有语音的任务行放一个播放小图标(位置随目标图标让位), 点击播放该任务的
+-- 行(与原先老客户端行按钮共用 PlayRowButton)。设施一律按能力探测(行池和行迭代
+-- 器都在才启用), 不按版本号。
+-- =============================================================================
+local modernRowButtons = {}   -- [questID] = Button
+
+-- 行左侧那一格在客户端开了"任务目标"显示时, 是它自己的目标小图标(20×20 的方
+-- 按钮, 带任务号, 挂在行的父层、不在行里)。探一下它在不在: 在就把播放按钮让到
+-- 行的另一头, 别叠上去。形状/来源/尺寸三条判据都按客户端自己的任务目标图标来。
+local function FindRowPOIButton(row, questID)
+    local parent = row:GetParent()
+    if not parent or not parent.GetChildren then return nil end
+    local children = { parent:GetChildren() }
+    for _, child in ipairs(children) do
+        if child and not child.QEIsPlayButton and child.questID
+            and tonumber(child.questID) == questID
+            and child.IsShown and child:IsShown()
+            and child.GetObjectType and child:GetObjectType() == "Button"
+            and child.GetWidth and math.abs(child:GetWidth() - 20) < 1 then
+            return child
+        end
+    end
+    return nil
+end
+
+function QuestEcho.UpdateModernRowButtons()
+    -- 懒挂"列表重画"钩子: 这套设施齐全时才挂, 之后每次任务日志重画都会回来。
+    if not QuestEcho.modernRowHooked
+        and type(hooksecurefunc) == "function"
+        and type(QuestLogQuests_Update) == "function" then
+        local okHook = pcall(hooksecurefunc, "QuestLogQuests_Update", function()
+            pcall(QuestEcho.UpdateModernRowButtons)
+        end)
+        if okHook then QuestEcho.modernRowHooked = true end
+    end
+
+    local sf = _G["QuestScrollFrame"]
+    local pool = sf and sf.titleFramePool
+    if not (pool and pool.EnumerateActive) then return end
+
+    -- 先把所有按钮收起来: 行框是循环复用的, 留在旧行上的按钮会标错任务。
+    for _qid, b in pairs(modernRowButtons) do
+        if b and type(b.Hide) == "function" then
+            pcall(function() b:Hide() end)
+        end
+    end
+
+    local shown = 0
+    local okWalk = pcall(function()
+        for row in pool:EnumerateActive() do
+            pcall(function()
+                local questID = tonumber(row.questID)
+                if questID and questID > 0 then
+                    local title = GetQuestTitle(questID) or ""
+                    -- 客户端报不出标题时退到行上可见文本: 行号与
+                    -- 语音包对不上时, 这一步是找回包里任务号的唯一线索。
+                    if title == "" and row.Text then
+                        local okT, t = pcall(function() return row.Text:GetText() end)
+                        if okT and type(t) == "string" and t ~= "" then title = t end
+                    end
+                    -- 与老客户端行按钮同一套判定: 行里的 id 优先, 客户端号与
+                    -- 语音包不一致时再按标题找回包里的号。
+                    local probeID
+                    if DataModules:HasSound(questID, Enums.SoundEvent.QuestAccept) then
+                        probeID = questID
+                    elseif title ~= "" then
+                        probeID = DataModules:GetQuestID(Enums.SoundEvent.QuestAccept,
+                                                        LookupTitle(title))
+                    end
+                    if probeID and DataModules:PrepareSound({
+                        event = Enums.SoundEvent.QuestAccept,
+                        questID = probeID,
+                        title = title,
+                    }) then
+                        local b = modernRowButtons[questID]
+                        if not b then
+                            b = CreateFrame("Button", nil, sf)
+                            b:SetSize(20, 20)
+                            pcall(b.SetHitRectInsets, b, 2, 2, 2, 2)
+                            -- 图标沿用状态栏那两张 TGA 的播放三角: 客户端字体
+                            -- 里没有 ▶(U+25B6), 写字符出来是方块。
+                            local icon = b:CreateTexture(nil, "OVERLAY")
+                            icon:SetSize(14, 14)
+                            icon:SetPoint("CENTER", b, "CENTER", 0, 0)
+                            icon:SetTexture("Interface\\AddOns\\QuestEcho\\QuestEchoPlay.tga")
+                            b:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight")
+                            b:SetScript("OnClick", function(self)
+                                pcall(PlayRowButton, self)
+                            end)
+                            b.QEIsPlayButton = true   -- 标记自己, 图标探测要跳过同类
+                            modernRowButtons[questID] = b
+                        end
+                        -- 行是行池里借出来的: 按钮挂到行的父层贴着行走, 滚动时
+                        -- 跟内容一起移动, 每次重画都重新贴一次。
+                        b:SetParent(row:GetParent())
+                        if type(row.GetFrameLevel) == "function" then
+                            local okL, lvl = pcall(function() return row:GetFrameLevel() end)
+                            if okL and type(lvl) == "number" then
+                                pcall(function() b:SetFrameLevel(lvl + 2) end)
+                            end
+                        end
+                        b:ClearAllPoints()
+                        -- 锚点: 行左内侧空着就放在标题之前(6,-4); 那一格
+                        -- 被客户端自己的"任务目标"图标占用时, 让到行的另一头、追踪勾
+                        -- 选框左边。探测失败一律当"图标在", 宁可靠边也不盖别人的图标。
+                        local okP, poi = pcall(FindRowPOIButton, row, questID)
+                        if okP and not poi then
+                            b:SetPoint("TOPLEFT", row, "TOPLEFT", 6, -4)
+                        elseif row.Checkbox then
+                            b:SetPoint("RIGHT", row.Checkbox, "LEFT", -2, 0)
+                        else
+                            b:SetPoint("TOPRIGHT", row, "TOPRIGHT", -4, -2)
+                        end
+                        b.questTitle = title
+                        b.questID = questID
+                        if not DataModules:HasSound(b.questID, Enums.SoundEvent.QuestAccept) then
+                            b.questID = DataModules:GetQuestID(Enums.SoundEvent.QuestAccept,
+                                                                LookupTitle(title))
+                        end
+                        b:Show()
+                        shown = shown + 1
+                    end
+                end
+            end)
+        end
+    end)
+    QuestEcho.ModernRowButtonCount = okWalk and shown or -1
+end
+
 
 -- =============================================================================
 -- Track the selected quest by hooking the log rows themselves.
 --
--- This must not depend on UpdateRowButtons: that is no longer called (the per-row Echo
--- buttons were removed), so a hook installed there never ran, lastPickedTitle stayed
--- nil, and the button only refreshed when the log was reopened.
+-- This must not depend on UpdateRowButtons: on these clients the per-row buttons
+-- never appear any more (2026-10-09 - only the detail-panel Echo button remains),
+-- so a hook installed inside it would never run: lastPickedTitle would stay nil
+-- and the button would only refresh when the log was reopened.
 -- =============================================================================
 
 local function HookQuestRows()
@@ -5446,7 +5556,12 @@ function Keys:StopAll()
 end
 
 function Keys:Settings()
-    QuestEcho.OptionsUI:Toggle()
+    local O = QuestEcho.OptionsUI
+    if O and O.Open then
+        O:Open()
+    elseif O and O.Toggle then
+        O:Toggle()
+    end
 end
 
 BINDING_HEADER_QUESTECHO = "QuestEcho"
@@ -5482,6 +5597,7 @@ local function Help()
     Print("|cff33ffccQuestEcho|r " .. tostring(GetAddOnMetadata("QuestEcho", "Version") or ""))
     Print("/qe — " .. L("toggle status bar", "开关状态栏"))
     Print("/qe settings — " .. L("open settings", "打开设置"))
+    Print("/qe welcome — " .. L("reopen the welcome window", "重新打开欢迎窗口"))
     Print("/qe captions on|off — " .. L("toggle captions", "开关字幕"))
     Print("/qe diag — " .. L("diagnostics", "诊断信息"))
     Print("/qe test — " .. L("play a test voice", "播放测试语音"))
@@ -5503,8 +5619,13 @@ end
 -- transcribing the chat frame.
 -- =============================================================================
 QuestEcho.Log = {}
+-- 隐私: 存档文件(QuestEcho.lua)里只留台词(harvest)和设置(profile)。
+-- 聊天框捕获抓的是聊天框里显示的**所有**内容(别人的话也在里面), 默认彻底关掉,
+-- 既不留内存也不落盘。要排查问题时用 /qe debuglog on 临时打开。
+QuestEcho.KeepLog = false
 
 function QuestEcho.Record(text)
+    if not QuestEcho.KeepLog then return end
     local log = QuestEcho.Log
     log[table.getn(log) + 1] = tostring(text)
     -- keep only the newest entries
@@ -5868,7 +5989,8 @@ local function Diag()
     local db2 = _G["QuestEchoDetailButton"]
     say("  echoBtn(detail)=" .. yn(db2 ~= nil) .. " " .. pos(db2) .. " " .. shown(db2))
     say("  detailFrame=" .. tostring(QuestLogDetailFrame() and "yes" or "no")
-        .. " rowBtns=" .. tostring(rowButtonCount))
+        .. " rowBtns=" .. tostring(rowButtonCount)
+        .. " modernBtns=" .. tostring(QuestEcho.ModernRowButtonCount or 0))
 
     say("/qe test | /qe diag | /qe settings | /qe resetpos")
 end
@@ -5953,7 +6075,15 @@ function HandleSlashCommandInner(input)
     if command == "" then
         SoundQueueUI:Toggle()
     elseif command == "settings" or command == "opt" or command == "o" then
-        OptionsUI:Toggle()
+        if QuestEcho.OptionsUI and QuestEcho.OptionsUI.Open then
+            QuestEcho.OptionsUI:Open()
+        end
+    elseif command == "welcome" then
+        if QuestEcho.Welcome and QuestEcho.Welcome.Show then
+            QuestEcho.Welcome:Show()
+        else
+            Print(L("welcome window unavailable", "欢迎窗口不可用"))
+        end
     elseif command == "captions" or command == "caption" or command == "c" then
         if arg1 == "off" then
             Addon.db.profile.Captions = false
@@ -5979,6 +6109,18 @@ function HandleSlashCommandInner(input)
         if QuestEcho.Harvest then QuestEcho.Harvest:Clear() end
     elseif command == "flavor" then
         if QuestEcho.Harvest then QuestEcho.Harvest:SetFlavor(arg1) end
+    elseif command == "debuglog" then
+        local v = tostring(arg1 or "")
+        QuestEcho.KeepLog = (v == "on" or v == "1" or v == "true")
+        Print(L("chat capture " .. (QuestEcho.KeepLog and "ON (memory only, never saved)"
+                                    or "OFF — saved file keeps dialogue lines only"),
+                "聊天捕获" .. (QuestEcho.KeepLog and "：开（只进内存，不落盘）"
+                                    or "：关 —— 存档里只留台词")))
+    elseif command == "wipe" then
+        Addon.db.log = nil
+        Addon.db.playTrace = nil
+        Print(L("debug data removed from the saved file",
+                "存档里的调试数据已清除（下次登出生效）"))
     elseif command == "test" or command == "t" then
         TestPlay()
     elseif command == "help" or command == "h" then
@@ -6149,7 +6291,8 @@ local function OnEvent(self, event, a1, a2, a3)
         end
     elseif event == "QUEST_LOG_UPDATE" then
         pcall(HookQuestRows)
-        if ClassicRefreshButtons then pcall(HideAllRowButtons) end
+        -- 老客户端没有行内播放按钮了(2026-10-09), 万一有旧实例残留就收掉。
+        pcall(HideAllRowButtons)
         -- the panel may have been created since the last attempt
         pcall(CreateDetailEchoButton)
         if RefreshDetailEchoButton then pcall(RefreshDetailEchoButton) end
@@ -6158,12 +6301,15 @@ local function OnEvent(self, event, a1, a2, a3)
     elseif event == "PLAYER_LOGOUT" then
         -- Guarantee the SavedVariables global references the live db table so
         -- positions/settings always persist (handles nil-starting saves).
-        Addon.db.log = QuestEcho.Log
+        -- 隐私: 存档里只留台词 + 设置。聊天捕获(QuestEcho.Log)不落盘,
+        --       旧存档里残留的 log 段也在这里顺手清掉。
+        Addon.db.log = nil
         -- Persist the playback counters. Reading them from the saved file shows
         -- afterwards whether voice lines actually started on this client, so no
         -- dedicated test run is ever needed to answer that.
+        -- 同样属于调试信息, 只在显式打开 SaveDiagnostics 时才写。
         local tr = QuestEcho.StopTrace
-        if tr then
+        if tr and Addon.db.profile and Addon.db.profile.SaveDiagnostics then
             local pt = Addon.db.playTrace
             if type(pt) ~= "table" then pt = {} end
             Addon.db.playTrace = pt
@@ -6181,12 +6327,12 @@ local function OnEvent(self, event, a1, a2, a3)
         -- an addon raises many of them, and the text is otherwise unreadable here.
         local errs = QuestEcho.LastErrors
         local n = errs and table.getn(errs) or 0
-        if n > 0 then
-            Addon.db.log[table.getn(Addon.db.log) + 1] =
-                "[QE] lua errors: " .. tostring(n)
+        if n > 0 and Addon.db.playTrace then
+            local pe = Addon.db.playTrace
+            pe.errors = {}
             for _i = 1, n do
-                Addon.db.log[table.getn(Addon.db.log) + 1] =
-                    "  " .. string.sub(tostring(errs[_i]), 1, 200)
+                pe.errors[table.getn(pe.errors) + 1] =
+                    string.sub(tostring(errs[_i]), 1, 200)
             end
         end
         QuestEchoDB = Addon.db
@@ -6248,7 +6394,11 @@ startupFrame:SetScript("OnEvent", function()
             end
         end)
     end
-    local okOpt, errOpt = pcall(function() OptionsUI:Create() end)
+    -- 设置面板在 OptionsUI.lua 里搭, 并注册进客户端自带的插件选项列表。
+    local okOpt, errOpt = pcall(function()
+        local O = QuestEcho.OptionsUI
+        if O and O.Setup then O:Setup() end
+    end)
     if not okOpt then
         Print("[QuestEcho] options init error: " .. tostring(errOpt))
     end
@@ -6260,6 +6410,12 @@ startupFrame:SetScript("OnEvent", function()
         pcall(EventUtil.ContinueOnAddOnLoaded, "Blizzard_QuestLog", function()
             pcall(InstallQuestEchoButtons)
         end)
+    end
+    -- 现代任务日志(无限服等)的行内播放按钮: 懒挂刷新钩子并先试画; 老客户端没有
+    -- QuestScrollFrame, 这个函数直接空跑。
+    pcall(QuestEcho.UpdateModernRowButtons)
+    for _i = 1, 5 do
+        QEAfter(_i, function() pcall(QuestEcho.UpdateModernRowButtons) end)
     end
     -- classic-flavour clients build the legacy quest log lazily; retry a few
     -- times after login so the Echo button attaches reliably.
@@ -6273,9 +6429,10 @@ end
 
 local function InstallClassicQuestButtons()
     if not CAP.classicQuestLog then return end
-    -- The per-row buttons in the quest LIST were removed on request; only the
-    -- detail-panel button is used now.
-    HideAllRowButtons()
+    -- 行内播放按钮只在"无限服"这类现代任务日志客户端出现(见
+    -- QuestEcho.UpdateModernRowButtons); 老客户端按玩家 2026-10-09 的决定只保留
+    -- 详情面板原来的 Echo 按钮, 这里把任何残留的旧行按钮收掉。
+    pcall(HideAllRowButtons)
     -- Rows are still hooked, so selecting one is noticed immediately.
     pcall(HookQuestRows)
     -- and the client's own update routine is watched, which is the reliable signal
@@ -6330,8 +6487,8 @@ end
         end
     end
     HealthCheck()
-    print("|cff33ffcc[QuestEcho]|r " .. L("loaded — /qe for settings, hold Shift to drag frames",
-                                          "已加载 — /qe 打开设置，按住 Shift 可拖动界面框体"))
+    print("|cff33ffcc[QuestEcho]|r " .. L("loaded — /qe for settings, drag the bar to move it",
+                                          "已加载 — /qe 打开设置，状态栏可直接拖动"))
     -- SlashCmdList may not exist while our files load, and on some clients it
     -- is created well after PLAYER_LOGIN, so keep trying for a while. Each
     -- attempt is checked; the loop stops as soon as one succeeds.
