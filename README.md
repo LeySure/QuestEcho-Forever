@@ -87,11 +87,11 @@ Found a bug or have a feature request? Please [open an issue](https://github.com
 - 核心插件不包含任何语音文件，需单独下载语音包。
 - 因语音包体积过大，请从上方 **GitHub Releases** 页面下载。
 - 支持同时安装中英文语音包，互不冲突。
-- 兼容正式服、怀旧服和无限服（Forever）。
+- 兼容正式服、怀旧服和无限服（Forever）和乌龟水豚服和335巫妖王服。
 
 ### 安装步骤
 
-1. 从 [Releases 页面](https://github.com/LeySure/QuestEcho-Forever/releases/tag/1.7.0) 下载核心插件和所需语音包。
+1. 从 [Releases 页面](https://github.com/LeySure/QuestEcho-Forever/releases/tag/2.2.6) 下载核心插件和所需语音包。
 2. 将文件夹解压到游戏的 `Interface/AddOns` 目录。
 3. 在角色选择界面确保所有插件已启用。
 4. 进入游戏，使用 `/qe` 命令进行设置。
