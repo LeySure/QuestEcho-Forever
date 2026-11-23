@@ -48,7 +48,22 @@ Recommended: use the installer. It detects the client, selects the correct voice
 | `QuestEchoData-jaJP-2026.11.22.zip.001` `.002` | Japanese voice pack | Two volumes; download both |
 | `QuestEchoData-2026.11.23.zip.001` `.002` | English voice pack | Download all volumes of the same version |
 
-Manual install: download the core addon and the voice packs, join the split volumes, extract, and place `QuestEcho`, `QuestEchoData`, `QuestEchoData-zhCN` and `QuestEchoData-jaJP` into `Interface/AddOns`.
+### Other voice packs
+
+| File | Language | Version | Volumes |
+|---|---|---|---|
+| `QuestEchoData-deDE.zip.001` `.002` `.003` | German | 2026.11.21 | 3 |
+| `QuestEchoData-frFR.zip.001` `.002` | French | 2026.11.21 | 2 |
+| `QuestEchoData-esES.zip.001` `.002` | Spanish (Europe) | 2026.11.21 | 2 |
+| `QuestEchoData-esMX.zip.001` `.002` | Spanish (Latin America) | 2026.11.21 | 2 |
+| `QuestEchoData-itIT.zip.001` `.002` | Italian | 2026.11.21 | 2 |
+| `QuestEchoData-ptBR.zip.001` `.002` | Portuguese (Brazil) | 2026.11.21 | 2 |
+| `QuestEchoData-ruRU.zip.001` `.002` | Russian | 2026.11.21 | 2 |
+| `QuestEchoData-koKR.zip.001` | Korean | 2026.11.21 | 1 |
+| `QuestEchoData-zhCN-sichuan.zip` | Sichuanese | 2026.11.05 | Single file |
+| `QuestEchoData-Cantonese.zip` | Cantonese | 2026.10.29 | Single file |
+
+Manual install: download the core addon and the voice packs, join all volumes of the same pack, extract, and place the resulting folders into `Interface/AddOns`. Folder names are `QuestEcho`, `QuestEchoData`, `QuestEchoData-zhCN`, `QuestEchoData-jaJP`, `QuestEchoData-deDE`, `QuestEchoData-frFR`, `QuestEchoData-esES`, `QuestEchoData-esMX`, `QuestEchoData-itIT`, `QuestEchoData-ptBR`, `QuestEchoData-ruRU`, `QuestEchoData-koKR`, `QuestEchoData-zhCN-sichuan` and `QuestEchoData-Cantonese`.
 
 Website and additional language packs: [questecho.dpdns.org](https://questecho.dpdns.org)
 
@@ -137,7 +152,7 @@ QuestEcho 是一款魔兽世界沉浸式配音插件。接任务、交任务、�
 4. 在角色选择界面确认 `QuestEcho` 和对应的语音包已启用。
 5. 进入游戏，输入 `/qe` 打开设置。
 
-手动安装：把 `QuestEcho`、`QuestEchoData`、`QuestEchoData-zhCN`、`QuestEchoData-jaJP` 解压到 `Interface/AddOns`。分卷语音包需要把 `.001`、`.002` 放在同一目录，用 7-Zip 打开 `.001` 解压。
+手动安装：把插件本体和需要的语音包解压到 `Interface/AddOns`。分卷语音包要把同一版本的所有分卷放在同一目录，用 7-Zip 打开 `.001` 解压。普通话、英语、日语、德语、法语、西班牙语、意大利语、巴西葡语、俄语、韩语、四川话、粤语可以同时安装。
 
 兼容客户端：正式服 12.x、经典旧世 1.15、无限服、乌龟服 1.12、巫妖王之怒 3.3.5a、燃烧的远征周年服、泰坦重铸。
 
